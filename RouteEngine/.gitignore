@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-ssr
+*.local
+
+# Cached raw Overpass response (large, regenerable via `npm run build-graph`).
+scripts/.cache
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+# Logs
+npm-debug.log*

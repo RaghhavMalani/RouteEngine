@@ -1,0 +1,31 @@
+{
+  "name": "routeengine",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Phase 0 — cinematic visualizer of Dijkstra's algorithm on the real road network of Bengaluru.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "build-graph": "tsx scripts/build-graph.ts",
+    "build-water": "tsx scripts/build-water.ts"
+  },
+  "dependencies": {
+    "@deck.gl/core": "^9.0.40",
+    "@deck.gl/extensions": "^9.0.40",
+    "@deck.gl/layers": "^9.0.40",
+    "@deck.gl/mapbox": "^9.0.40",
+    "maplibre-gl": "^4.7.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
