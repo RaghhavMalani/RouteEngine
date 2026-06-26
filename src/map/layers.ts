@@ -129,15 +129,6 @@ function reveal(filterRange: [number, number]) {
   } as Record<string, unknown>;
 }
 
-function tintByHeight(c: RGB, t: number, alpha: number): RGBA {
-  const k = Math.min(1, Math.max(0, t)) * 0.65;
-  return [
-    Math.round(c[0] + (255 - c[0]) * k),
-    Math.round(c[1] + (255 - c[1]) * k),
-    Math.round(c[2] + (255 - c[2]) * k),
-    alpha,
-  ];
-}
 
 const lerp = (a: RGB, b: RGB, t: number): RGB => [
   a[0] + (b[0] - a[0]) * t,
