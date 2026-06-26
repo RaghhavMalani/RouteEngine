@@ -18,6 +18,9 @@ interface ControlPanelProps {
   onReset: () => void;
   /** Optional note under the buttons (e.g. a locked next stage). */
   hint: string | null;
+  /** Auto-play all four stages end-to-end (for a screen recording). */
+  onPlayDemo: () => void;
+  demoEnabled: boolean;
 }
 
 /**
@@ -37,6 +40,8 @@ export default function ControlPanel({
   onPrimary,
   onReset,
   hint,
+  onPlayDemo,
+  demoEnabled,
 }: ControlPanelProps) {
   return (
     <div className="panel">
@@ -97,6 +102,10 @@ export default function ControlPanel({
         </button>
       </div>
       {hint && <div className="panel-hint">{hint}</div>}
+
+      <button className="btn btn-demo" onClick={onPlayDemo} disabled={!demoEnabled}>
+        ▶ Play full sequence
+      </button>
     </div>
   );
 }

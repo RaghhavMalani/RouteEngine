@@ -93,6 +93,7 @@ export interface StageRender {
   chMode: boolean; // true on Stage 3 → two-colour search + arcs
   pulse: number; // 0..1 looping position of the flowing light once the route is drawn
   meetPoint: [number, number] | null; // CH: where the two searches met (pulsing marker)
+  presentation: boolean; // Stage 4 → hide ALL search, show only the calm route + pins
 }
 
 export interface LayerInput {
@@ -191,6 +192,8 @@ export function buildLayers(input: LayerInput): Layer[] {
     const filterRange: [number, number] = [-1, r.revealStep];
     const op = r.opacity;
     const ch = r.chMode;
+    // Stage 4: strip every search layer; only the calm route + pins remain.
+    const present = r.presentation;
 
     // For CH the search tree is drawn in SOLID forward/backward colour (no
     // whiten-by-height — that turned the funnels into white noise). Dijkstra/A*
@@ -202,7 +205,7 @@ export function buildLayers(input: LayerInput): Layer[] {
 
     // CH hierarchy beat: a SMALL, faint set of shortcut arcs sweeping high over
     // the network — a backdrop that suggests the precomputed structure, not a web.
-    if (ch && r.arcData.length > 0) {
+    if (ch && !present && r.arcData.length > 0) {
       layers.push(
         new ArcLayer<ArcDatum>({
           id: "ch-arcs",
@@ -225,7 +228,7 @@ export function buildLayers(input: LayerInput): Layer[] {
     // glowing flood). For CH we DON'T draw search edges — a node's parent is often
     // reached via a long shortcut, so those edges become meaningless city-spanning
     // lasers. CH's search reads instead as two converging clouds of dots (below).
-    if (!ch) {
+    if (!ch && !present) {
       layers.push(
         new LineLayer<EdgeDatum>({
           id: "frontier",
@@ -253,7 +256,7 @@ export function buildLayers(input: LayerInput): Layer[] {
       return rgba(d.dir === 1 ? CH_BWD : CH_FWD, 230); // two converging search clouds
     };
     // CH: soft glow halo behind the two converging search clouds.
-    if (ch) {
+    if (ch && !present) {
       layers.push(
         new ScatterplotLayer<NodeDatum>({
           id: "ch-glow",
@@ -269,27 +272,29 @@ export function buildLayers(input: LayerInput): Layer[] {
         }),
       );
     }
-    layers.push(
-      new ScatterplotLayer<NodeDatum>({
-        id: "settled",
-        data: r.nodeData,
-        opacity: op,
-        getPosition: (d) => [d.x, d.y, d.cost * zFactor],
-        getFillColor: nodeColor,
-        getRadius: (d) => (ch ? (d.dir === 2 ? 0.8 : 2.6) : 1.3),
-        radiusUnits: "pixels",
-        updateTriggers: {
-          getPosition: zFactor,
-          getFillColor: [r.accent, ch, r.maxCost],
-          getRadius: ch,
-        },
-        ...reveal(filterRange),
-      }),
-    );
+    if (!present) {
+      layers.push(
+        new ScatterplotLayer<NodeDatum>({
+          id: "settled",
+          data: r.nodeData,
+          opacity: op,
+          getPosition: (d) => [d.x, d.y, d.cost * zFactor],
+          getFillColor: nodeColor,
+          getRadius: (d) => (ch ? (d.dir === 2 ? 0.8 : 2.6) : 1.3),
+          radiusUnits: "pixels",
+          updateTriggers: {
+            getPosition: zFactor,
+            getFillColor: [r.accent, ch, r.maxCost],
+            getRadius: ch,
+          },
+          ...reveal(filterRange),
+        }),
+      );
+    }
 
     // Final / unpacked route ribbon.
     // CH: a pulsing ring at the node where the two searches met.
-    if (ch && r.meetPoint && r.revealStep >= 0) {
+    if (ch && !present && r.meetPoint && r.revealStep >= 0) {
       const pr = 9 + 7 * (0.5 + 0.5 * Math.sin(r.pulse * Math.PI * 2));
       layers.push(
         new ScatterplotLayer<{ p: [number, number] }>({
@@ -318,6 +323,10 @@ export function buildLayers(input: LayerInput): Layer[] {
         .map((p) => [p.x, p.y, ROUTE_LIFT] as [number, number, number]);
       const pathData = [{ path: coords }];
       const trig = { getPath: count };
+      // Stage 4 uses a CALM consumer-maps blue with a soft glow; the technical
+      // stages use the bright lime hero ribbon.
+      const routeRGB: RGB = present ? [74, 158, 255] : PATH_COLOR;
+      const coreRGBA: RGBA = present ? [206, 230, 255, 255] : [236, 255, 242, 255];
       layers.push(
         // soft outer bloom
         new PathLayer<{ path: [number, number, number][] }>({
@@ -325,8 +334,8 @@ export function buildLayers(input: LayerInput): Layer[] {
           data: pathData,
           opacity: op,
           getPath: (d) => d.path,
-          getColor: rgba(PATH_COLOR, 34),
-          getWidth: 26,
+          getColor: rgba(routeRGB, present ? 48 : 34),
+          getWidth: present ? 30 : 26,
           widthUnits: "pixels",
           capRounded: true,
           jointRounded: true,
@@ -338,8 +347,8 @@ export function buildLayers(input: LayerInput): Layer[] {
           data: pathData,
           opacity: op,
           getPath: (d) => d.path,
-          getColor: rgba(PATH_COLOR, 95),
-          getWidth: 12,
+          getColor: rgba(routeRGB, present ? 175 : 95),
+          getWidth: present ? 14 : 12,
           widthUnits: "pixels",
           capRounded: true,
           jointRounded: true,
@@ -351,8 +360,8 @@ export function buildLayers(input: LayerInput): Layer[] {
           data: pathData,
           opacity: op,
           getPath: (d) => d.path,
-          getColor: [236, 255, 242, 255],
-          getWidth: 4.5,
+          getColor: coreRGBA,
+          getWidth: present ? 5.5 : 4.5,
           widthUnits: "pixels",
           capRounded: true,
           jointRounded: true,

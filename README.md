@@ -14,7 +14,10 @@ flood outward in every direction. Press **Next** and the model *reforms* into
 layered hierarchy and then barely searches: two short funnels climb from the source
 and the target and meet in the middle, touching a few hundred nodes instead of a
 hundred thousand. A three-way compare card shows the payoff: same optimal route, a
-tiny fraction of the work.
+tiny fraction of the work. Press **Next** once more for **Stage 4 (What You Actually
+See)** — all the machinery fades away and you're left with the one calm route a maps
+app would show, plus an ETA. A **Play full sequence** button auto-plays all four
+stages end-to-end for a screen recording.
 
 ---
 
@@ -28,10 +31,10 @@ before. The route never changes — only how cleverly we search for it.
 | **Model 1 — Brute Force** | Dijkstra | available |
 | **Model 2 — Guided Search** | A\* (admissible heuristic) | available |
 | **Model 3 — Production** | Contraction Hierarchies | available |
-| **Model 4 — What You Actually See** | clean route + ETA | locked (coming) |
+| **Model 4 — What You Actually See** | clean route + ETA | available |
 
-The one remaining locked stage renders greyed with a lock — it doubles as a visible
-roadmap. (Stage 3 shows locked only until its precomputed CH cache finishes loading.)
+All four stages are now live. (Stage 3 shows locked only until its precomputed CH
+cache finishes loading; Stage 4 reuses the CH route, so it needs Stage 3 first.)
 
 **Height encodes the method.** In Stages 1–2, every explored node and edge is lifted
 off the ground by its **cost-from-source** `g(n)`. Dijkstra rises as a smooth,
@@ -105,6 +108,32 @@ search is *bounded* (capped at a few hundred settled nodes), so a few unnecessar
 get added — standard CH engineering. On this graph preprocessing takes **~8s** and adds
 **~270k shortcuts** (≈1× the original edge count). That doesn't affect correctness; a
 slightly larger hierarchy just means a few extra edges, never a wrong or longer route.
+
+### Stage 3 → Stage 4: What You Actually See (the product)
+
+Stage 4 is **subtraction**. The whole sequence has been about the machinery; the closer
+takes it all away. Entering Stage 4, every search layer (flood, frontier, hierarchy,
+shortcut arcs) fades out, the camera eases down to a calmer, closer view, and you're left
+with exactly what a consumer maps app shows: **clean pins and one smooth route line** (the
+Stage 3 CH path, unpacked to real roads) in a restrained accent colour — plus a route card.
+
+**The ETA.** The card shows estimated travel time, distance, the dominant road ("via …"),
+and an arrival clock. The time is a genuine **free-flow estimate**: each OSM road class is
+given a typical free-flow speed (motorway/trunk fast, primary/secondary medium, residential
+slow) and the route's per-segment times are summed (`src/engine/eta.ts`). On Electronic City
+→ Whitefield that's **20.95 km ≈ 41 min** via primary roads.
+
+**Honest caveats.** This is *free-flow* time (empty roads), **not** traffic-aware, and the
+displayed route is **distance-optimal** (from CH), not yet time-optimal. The per-class speed
+table is deliberately the hook for the next arc: swap those constants for live/historical
+per-edge speeds and the same summation becomes a traffic-aware ETA; feed them back as edge
+weights and the route becomes time-optimal. A small **"Show what really happened"** control
+jumps back to the Stage 3 technical view so a viewer can connect the clean result to the
+machinery behind it.
+
+**Demo Mode.** *Play full sequence* auto-selects Electronic City → Whitefield and auto-runs
+Stage 1 → 2 → 3 → 4 with a caption per stage and a corner wordmark — a ~30–60s hands-free
+take for a screen recording, ending on the clean route and the punchline.
 
 ---
 
@@ -321,23 +350,26 @@ src/engine/                 pure TypeScript routing engine (no UI imports)
   dijkstra.ts                 Stage 1: Dijkstra + exploration log + stats
   astar.ts                    Stage 2: A* (g + haversine h), same interface
   ch.ts                       Stage 3: CH query (bidirectional + unpacking)
+  eta.ts                      Stage 4: free-flow ETA from per-road-class speeds
   nearest.ts                  snap a clicked lng/lat to the closest node
   geo.ts                      haversine distance (used as weight AND A* heuristic)
   pathfinder.ts               public barrel + Pathfinder interface
 
-src/stages.ts               the staged sequence (Models 1–3 available; 4 locked)
+src/stages.ts               the staged sequence (Models 1–4, all live)
 
 src/map/
-  MapView.tsx                 blank dark stage + deck.gl model + orbit camera
+  MapView.tsx                 blank dark stage + deck.gl model + cinematic camera
   layers.ts                   road model + per-stage frontier/route layers
 
 src/ui/
-  ControlPanel.tsx            endpoints, quick-picks, speed, Build/Next/Reset
-  StageTimeline.tsx           the construction-phases indicator (with locks)
+  Intro.tsx                   cinematic title card on load
+  ControlPanel.tsx            endpoints, quick-picks, speed, Build/Next, Play demo
+  StageTimeline.tsx           the construction-phases indicator
   Metrics.tsx                 per-stage live metrics HUD
-  CompareCard.tsx             Dijkstra-vs-A* payoff card
+  CompareCard.tsx             Dijkstra-vs-A*-vs-CH payoff card (truthful per-row)
+  RouteCard.tsx               Stage 4 consumer route sheet (ETA / distance / via)
 
-src/App.tsx                  stage state machine + reform transition + clock
+src/App.tsx                  stage state machine + reform + camera + Demo Mode
 src/places.ts                famous Bengaluru landmarks for quick-pick routes
 ```
 
@@ -374,8 +406,10 @@ payload with a known topology.
 
 ## Roadmap
 
-- **Model 4 — Production presentation:** the clean route + ETA a rider actually sees.
-- Directed graph honouring one-ways and turn restrictions.
-- Travel-time weights and live traffic; dynamic rerouting.
+All four models are built (see the Stage 2 → 3 and Stage 3 → 4 sections above). Next:
 
-(**Model 3 — Contraction Hierarchies** is now built — see the Stage 2 → 3 section above.)
+- **Live traffic + time-optimal routing:** replace the free-flow per-class speeds with
+  live/historical per-edge speeds — the ETA becomes traffic-aware and the route becomes
+  time-optimal (the Stage 4 speed table is the seam this plugs into).
+- Directed graph honouring one-ways and turn restrictions.
+- Dynamic rerouting as conditions change.

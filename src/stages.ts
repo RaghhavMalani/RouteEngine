@@ -31,6 +31,14 @@ export interface Stage {
    * permanently locked / "coming".)
    */
   needsCH?: boolean;
+  /**
+   * True for Stage 4: it runs no search of its own. It REUSES the Stage 3 (CH)
+   * route and presents it the way a consumer maps app would — all the search
+   * machinery stripped away. Not locked.
+   */
+  presentation?: boolean;
+  /** One-line caption shown per stage during Demo Mode. */
+  caption: string;
   /** Frontier accent colour (RGB 0–255) — Dijkstra's flood vs A*'s beam differ. */
   accent: [number, number, number];
 }
@@ -41,6 +49,7 @@ export const STAGES: Stage[] = [
     name: "Brute Force",
     algo: "Dijkstra",
     blurb: "Explore outward in every direction until the destination is reached.",
+    caption: "Dijkstra — explores in every direction",
     pathfinder: new DijkstraPathfinder(),
     accent: [56, 232, 255], // cyan flood
   },
@@ -49,6 +58,7 @@ export const STAGES: Stage[] = [
     name: "Guided Search",
     algo: "A*",
     blurb: "Add a straight-line heuristic to aim the search at the goal.",
+    caption: "A* — aims toward the goal",
     pathfinder: new AStarPathfinder(),
     accent: [120, 245, 150], // green beam
   },
@@ -57,6 +67,7 @@ export const STAGES: Stage[] = [
     name: "Production",
     algo: "Contraction Hierarchies",
     blurb: "Precomputed shortcuts let the query skip huge regions and barely search.",
+    caption: "Contraction Hierarchies — barely searches",
     pathfinder: null, // supplied at runtime once the CH cache loads (needsCH)
     needsCH: true,
     accent: [180, 160, 255],
@@ -65,15 +76,17 @@ export const STAGES: Stage[] = [
     model: "Model 4",
     name: "What You Actually See",
     algo: "Clean route + ETA",
-    blurb: "The polished result a rider sees — just the line and the time. (Coming.)",
-    pathfinder: null, // locked
-    accent: [255, 205, 120],
+    blurb: "The production route a rider sees — all the search hidden away.",
+    caption: "What you actually see",
+    pathfinder: null, // no search of its own — reuses the CH route (presentation)
+    presentation: true,
+    accent: [120, 200, 255], // calm consumer-maps blue
   },
 ];
 
 /**
- * Permanently locked / "coming" = no engine AND not the CH stage. Stage 3
- * (needsCH) is not permanently locked — App enables it once the CH cache loads;
- * Stage 4 has neither, so it stays locked.
+ * Permanently locked / "coming". Stage 3 (needsCH) unlocks once the CH cache
+ * loads; Stage 4 (presentation) reuses the CH route, so it's never locked either.
  */
-export const isLocked = (s: Stage): boolean => s.pathfinder === null && !s.needsCH;
+export const isLocked = (s: Stage): boolean =>
+  s.pathfinder === null && !s.needsCH && !s.presentation;

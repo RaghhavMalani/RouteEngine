@@ -13,8 +13,10 @@ import Metrics from "./ui/Metrics";
 import StageTimeline, { type StageStatus } from "./ui/StageTimeline";
 import CompareCard from "./ui/CompareCard";
 import Intro from "./ui/Intro";
+import RouteCard from "./ui/RouteCard";
 import { STAGES, isLocked } from "./stages";
-import { type QuickRoute } from "./places";
+import { QUICK_ROUTES, type QuickRoute } from "./places";
+import { estimateRoute } from "./engine/eta";
 import {
   Graph,
   nearestNode,
@@ -43,6 +45,7 @@ interface FrameRoute {
 
 const fmtCoord = (c: LngLat) => `${c[1].toFixed(4)}, ${c[0].toFixed(4)}`;
 const CH_STAGE = 2; // Stage 3 index
+const PRESENT_STAGE = 3; // Stage 4 index — the clean "what you actually see" view
 
 export default function App() {
   const [graph, setGraph] = useState<Graph | null>(null);
@@ -69,6 +72,8 @@ export default function App() {
   const [showCompare, setShowCompare] = useState(false);
   const [showIntro, setShowIntro] = useState(true);
   const [pulse, setPulse] = useState(0);
+  const [demoMode, setDemoMode] = useState(false);
+  const [punchToken, setPunchToken] = useState(0); // bump to (re)reveal the punchline
 
   // Dissolve the intro title card after its animation finishes.
   useEffect(() => {
@@ -139,8 +144,18 @@ export default function App() {
   }, [graph]);
 
   // --- Precompute the active stage's drawable geometry (once per stage) -------
-  const result = results[currentStage] ?? null;
   const isCH = currentStage === CH_STAGE;
+  const presentation = currentStage === PRESENT_STAGE;
+  // Stage 4 keeps NO result of its own — it always derives the route from the
+  // live CH result (with an empty log so only the clean route draws). This makes
+  // it impossible for the Stage-4 view and "Show what really happened" to disagree.
+  const result = useMemo<PathResult | null>(() => {
+    if (presentation) {
+      const ch = results[CH_STAGE];
+      return ch ? { path: ch.path, log: [], stats: ch.stats, meetNode: ch.meetNode } : null;
+    }
+    return results[currentStage] ?? null;
+  }, [presentation, results, currentStage]);
   const precomp = useMemo(() => {
     if (!result || !graph) return null;
     const edgeData: EdgeDatum[] = [];
@@ -188,13 +203,21 @@ export default function App() {
   const logLen = result?.log.length ?? 0;
   const pathLen = precomp?.pathPts.length ?? 0;
 
+  // Stage 4 ETA — free-flow travel-time estimate from the displayed CH route.
+  const routeEstimate = useMemo(() => {
+    if (!graph || !presentation || !result || result.path.length < 2) return null;
+    return estimateRoute(graph, result.path);
+  }, [graph, presentation, result]);
+
   // --- Animation loop --------------------------------------------------------
   useEffect(() => {
     if (!result || (phase !== "playing" && phase !== "in" && phase !== "out")) return;
     let raf = 0;
     const retractStep = Math.max(2000, Math.ceil(logLen / 30));
     const growStep = phase === "in" ? Math.max(speed, Math.ceil(logLen / 42)) : speed;
-    const pathInc = phase === "in" ? 0.12 : 0.04 * (0.5 + speed / 120);
+    // Stage 4 draws its single clean route on gently (product-grade); the
+    // technical stages reveal their path faster behind the search.
+    const pathInc = presentation ? 0.02 : phase === "in" ? 0.12 : 0.04 * (0.5 + speed / 120);
 
     const tick = () => {
       setAnim((prev) => {
@@ -216,7 +239,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [phase, result, speed, logLen, pathLen]);
+  }, [phase, result, speed, logLen, pathLen, presentation]);
 
   // Flowing pulse of light travelling along the finished route (loops).
   useEffect(() => {
@@ -248,8 +271,10 @@ export default function App() {
       if (currentStage === 1 && results[0] && results[1]) setShowCompare(true);
       if (currentStage === CH_STAGE && results[0] && results[1] && results[2])
         setShowCompare(true);
+      // Stage 4 settled → reveal the punchline once.
+      if (currentStage === PRESENT_STAGE) setPunchToken(Date.now());
       // Zoom into the finished route so it reads clearly.
-      const rr = results[currentStage];
+      const rr = result;
       if (rr && rr.path.length >= 2 && graph) {
         let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
         for (const id of rr.path) {
@@ -262,7 +287,17 @@ export default function App() {
         setFramePath({ min: [a, b], max: [c, d], token: Date.now() });
       }
     }
-  }, [phase, anim, logLen, pathLen, currentStage, results, graph]);
+  }, [phase, anim, logLen, pathLen, currentStage, results, graph, result]);
+
+  // Demo Mode: once a stage settles, pause to let the viewer read, then auto-
+  // advance to the next stage — all the way to Stage 4. No manual clicks.
+  useEffect(() => {
+    if (!demoMode || phase !== "done") return;
+    if (currentStage >= PRESENT_STAGE) return; // reached the clean view → stop
+    const t = window.setTimeout(() => handleNext(), 2800);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoMode, phase, currentStage]);
 
   // --- Actions ---------------------------------------------------------------
   function resetBuild() {
@@ -287,6 +322,7 @@ export default function App() {
 
   function handleBuild() {
     if (sourceId == null || destId == null || !graph) return;
+    setDemoMode(false);
     play(0, sourceId, destId, {});
   }
 
@@ -295,6 +331,19 @@ export default function App() {
     if (next >= STAGES.length || isLocked(STAGES[next]) || !graph) return;
     if (STAGES[next].needsCH && !chReady) return;
     if (sourceId == null || destId == null) return;
+    // Stage 4 (presentation): no search of its own — the route is derived live
+    // from the CH result (see `result` above), so we only drive the transition.
+    if (STAGES[next].presentation) {
+      if (!results[CH_STAGE]) return;
+      setShowCompare(false);
+      setPhase("out");
+      setFrameRoute({
+        source: graph.coords[sourceId],
+        dest: graph.coords[destId],
+        token: Date.now(),
+      });
+      return;
+    }
     const pf = pathfinderFor(next);
     if (!pf) return;
     const res = pf.findPath(graph, sourceId, destId);
@@ -318,6 +367,7 @@ export default function App() {
 
   function handleMapClick(lng: number, lat: number) {
     if (!graph) return;
+    setDemoMode(false); // manual interaction exits Demo Mode
     const id = nearestNode(graph, lng, lat);
     const label = fmtCoord(graph.coords[id]);
     resetBuild();
@@ -335,6 +385,7 @@ export default function App() {
 
   function handleQuickRoute(route: QuickRoute) {
     if (!graph) return;
+    setDemoMode(false);
     const s = nearestNode(graph, route.from.coord[0], route.from.coord[1]);
     const d = nearestNode(graph, route.to.coord[0], route.to.coord[1]);
     setSourceId(s);
@@ -355,6 +406,50 @@ export default function App() {
     setFrameRoute(null);
     setFocus(null);
     setFramePath(null);
+    setDemoMode(false);
+    setPunchToken(0);
+  }
+
+  // Auto-play the whole sequence for a screen recording. Uses the endpoints YOU
+  // picked if both are set; otherwise defaults to Electronic City → Whitefield.
+  // The auto-advance effect then carries it through Stages 1 → 4.
+  function handlePlayDemo() {
+    if (!graph || !chReady) return;
+    let s = sourceId;
+    let d = destId;
+    if (s == null || d == null) {
+      const route = QUICK_ROUTES[0]; // Electronic City → Whitefield
+      s = nearestNode(graph, route.from.coord[0], route.from.coord[1]);
+      d = nearestNode(graph, route.to.coord[0], route.to.coord[1]);
+      setSourceId(s);
+      setDestId(d);
+      setSourceLabel(route.from.name);
+      setDestLabel(route.to.name);
+    }
+    setMode("source");
+    setSpeed(340);
+    setPunchToken(0);
+    setDemoMode(true);
+    play(0, s, d, {});
+  }
+
+  // Stage 4 → "Show what really happened": jump back to the fully-revealed CH
+  // technical view so viewers connect the clean result to the machinery.
+  function handleShowReal() {
+    const chRes = results[CH_STAGE];
+    if (!chRes || !graph) return;
+    setDemoMode(false);
+    setCurrentStage(CH_STAGE);
+    setAnim({ revealStep: chRes.log.length, pathReveal: 1 });
+    setPhase("done");
+    setShowCompare(false);
+    if (sourceId != null && destId != null) {
+      setFrameRoute({
+        source: graph.coords[sourceId],
+        dest: graph.coords[destId],
+        token: Date.now(),
+      });
+    }
   }
 
   // --- Build layers ----------------------------------------------------------
@@ -379,6 +474,7 @@ export default function App() {
               isCH && result.meetNode != null
                 ? (graph.coords[result.meetNode] as [number, number])
                 : null,
+            presentation,
           }
         : null;
 
@@ -511,21 +607,25 @@ export default function App() {
         onPrimary={onPrimary}
         onReset={handleReset}
         hint={hint}
+        onPlayDemo={handlePlayDemo}
+        demoEnabled={chReady && !busy}
       />
 
       <StageTimeline statuses={statuses} />
 
-      <Metrics
-        stageModel={result ? stage.model : null}
-        stageName={result ? stage.name : null}
-        algo={result ? stage.algo : null}
-        accent={stage.accent}
-        nodesExplored={precomp ? precomp.searchNodesCum[k] : 0}
-        edgesRelaxed={precomp ? precomp.searchEdgesCum[k] : 0}
-        distanceKm={distanceKm}
-        computeTimeMs={result ? result.stats.computeTimeMs : null}
-        totalNodes={graph.nodeCount}
-      />
+      {!presentation && (
+        <Metrics
+          stageModel={result ? stage.model : null}
+          stageName={result ? stage.name : null}
+          algo={result ? stage.algo : null}
+          accent={stage.accent}
+          nodesExplored={precomp ? precomp.searchNodesCum[k] : 0}
+          edgesRelaxed={precomp ? precomp.searchEdgesCum[k] : 0}
+          distanceKm={distanceKm}
+          computeTimeMs={result ? result.stats.computeTimeMs : null}
+          totalNodes={graph.nodeCount}
+        />
+      )}
 
       {showCompare && results[0] && results[1] && (
         <CompareCard
@@ -534,6 +634,32 @@ export default function App() {
           ch={results[2]?.stats ?? null}
           onClose={() => setShowCompare(false)}
         />
+      )}
+
+      {/* Stage 4: the consumer-app route card + the punchline + "show the machinery". */}
+      {presentation && phase === "done" && routeEstimate && (
+        <>
+          <RouteCard
+            fromLabel={sourceLabel}
+            toLabel={destLabel}
+            minutes={routeEstimate.minutes}
+            distanceKm={routeEstimate.distanceKm}
+            via={routeEstimate.via}
+            onShowReal={handleShowReal}
+          />
+          <div key={punchToken} className="punchline">
+            Everything you just watched happens invisibly — in milliseconds — every
+            time you tap <b>Go</b>.
+          </div>
+        </>
+      )}
+
+      {/* Demo Mode: per-stage caption + corner wordmark for screen recording. */}
+      {demoMode && (
+        <>
+          <div className="demo-caption">{stage.caption}</div>
+          <div className="demo-wordmark">RouteEngine</div>
+        </>
       )}
 
       {showIntro && <Intro />}
