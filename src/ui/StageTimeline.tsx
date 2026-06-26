@@ -1,4 +1,4 @@
-import { STAGES, isLocked } from "../stages";
+import { STAGES } from "../stages";
 
 export type StageStatus = "done" | "active" | "available" | "locked";
 
@@ -19,7 +19,6 @@ export default function StageTimeline({ statuses }: StageTimelineProps) {
       <div className="section-label">Construction sequence</div>
       {STAGES.map((stage, i) => {
         const status = statuses[i];
-        const locked = isLocked(stage);
         return (
           <div key={stage.model} className={`stage-row ${status}`}>
             <div
@@ -32,7 +31,7 @@ export default function StageTimeline({ statuses }: StageTimelineProps) {
                 borderColor: rgb(stage.accent),
               }}
             >
-              {status === "done" ? "✓" : locked ? "🔒" : ""}
+              {status === "done" ? "✓" : status === "locked" ? "🔒" : ""}
             </div>
             <div className="stage-text">
               <div className="stage-title">

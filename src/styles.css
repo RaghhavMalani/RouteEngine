@@ -1,15 +1,18 @@
 /* RouteEngine — dark, full-bleed, cinematic. */
 
 :root {
-  /* Accent palette: cyan frontier, warm amber settled, bright lime final path. */
   --accent: #38e8ff;
   --accent-2: #7c5cff;
   --path: #b6ff3c;
-  --text: #e8eef2;
-  --text-dim: #9fb0bd;
-  --panel-bg: rgba(16, 22, 30, 0.62);
-  --panel-border: rgba(255, 255, 255, 0.12);
-  --panel-bg-solid: rgba(16, 22, 30, 0.9);
+  --text: #eef3f7;
+  --text-dim: #93a6b4;
+  --text-faint: #5d6e7c;
+  --panel-bg: rgba(12, 17, 24, 0.55);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --panel-bg-solid: rgba(11, 15, 21, 0.92);
+  --hair: rgba(255, 255, 255, 0.06);
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --font-ui: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
 * {
@@ -24,68 +27,178 @@ body,
   width: 100%;
   background: #05080c;
   color: var(--text);
-  font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-ui);
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* Full-bleed map canvas. */
 .map-root {
   position: absolute;
   inset: 0;
 }
 
-/* Subtle "stage" vignette: a radial gradient over the dark canvas to give the
-   model depth, like a lit display table. Non-interactive so clicks pass through. */
+/* Stage vignette + cinematic letterbox feel. */
 .stage-vignette {
   position: absolute;
   inset: 0;
   pointer-events: none;
   z-index: 1;
-  background: radial-gradient(
-    ellipse 80% 70% at 50% 42%,
-    rgba(20, 32, 46, 0.0) 0%,
-    rgba(6, 9, 13, 0.35) 70%,
-    rgba(3, 5, 8, 0.78) 100%
-  );
+  background:
+    linear-gradient(180deg, rgba(3, 5, 8, 0.55) 0%, rgba(3, 5, 8, 0) 14%, rgba(3, 5, 8, 0) 86%, rgba(3, 5, 8, 0.6) 100%),
+    radial-gradient(
+      ellipse 82% 72% at 50% 44%,
+      rgba(20, 32, 46, 0) 0%,
+      rgba(6, 9, 13, 0.32) 68%,
+      rgba(3, 5, 8, 0.8) 100%
+    );
+}
+
+/* --- Cinematic intro title card ------------------------------------------- */
+.intro {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  background: radial-gradient(ellipse 60% 60% at 50% 50%, rgba(8, 12, 18, 0.55), rgba(4, 6, 10, 0.92));
+  backdrop-filter: blur(3px);
+  animation: introOut 800ms ease 2050ms forwards;
+  pointer-events: none;
+}
+.intro .eyebrow {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 6px;
+  color: var(--text-faint);
+  opacity: 0;
+  animation: introUp 900ms ease 200ms forwards;
+}
+.intro .title {
+  font-family: var(--font-display);
+  font-weight: 300;
+  font-size: clamp(48px, 9vw, 132px);
+  letter-spacing: -1.5px;
+  line-height: 0.95;
+  color: var(--text);
+  opacity: 0;
+  animation: introUp 1100ms cubic-bezier(0.16, 1, 0.3, 1) 380ms forwards;
+}
+.intro .title em {
+  font-style: italic;
+  color: var(--accent);
+}
+.intro .sub {
+  font-size: 13px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  opacity: 0;
+  animation: introUp 900ms ease 760ms forwards;
+}
+.intro .rule {
+  width: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: introRule 1200ms ease 900ms forwards;
+}
+@keyframes introUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes introRule {
+  from { width: 0; opacity: 0; }
+  to { width: 260px; opacity: 1; }
+}
+@keyframes introOut {
+  to { opacity: 0; visibility: hidden; }
+}
+
+/* --- Selection hint (no crosshair) ---------------------------------------- */
+.select-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 40px;
+  translate: -50% 0;
+  z-index: 9;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 18px;
+  border-radius: 999px;
+  background: rgba(8, 12, 18, 0.66);
+  border: 1px solid var(--panel-border);
+  backdrop-filter: blur(12px);
+  font-size: 11.5px;
+  letter-spacing: 1.4px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  white-space: nowrap;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  animation: hintIn 600ms ease;
+}
+.select-hint b { color: var(--sel-color, var(--accent)); font-weight: 600; }
+.select-hint .sel-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sel-color, var(--accent));
+  box-shadow: 0 0 10px 1px var(--sel-color, var(--accent));
+  animation: dotPulse 1.6s ease-in-out infinite;
+}
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+@keyframes hintIn {
+  from { opacity: 0; transform: translateY(8px); translate: -50% 8px; }
+  to { opacity: 1; translate: -50% 0; }
 }
 
 /* --- Glass control panel --------------------------------------------------- */
 .panel {
   position: absolute;
-  top: 18px;
-  left: 18px;
-  width: 320px;
-  padding: 18px;
-  border-radius: 16px;
+  top: 22px;
+  left: 22px;
+  width: 322px;
+  padding: 20px 20px 18px;
+  border-radius: 18px;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(22px) saturate(135%);
+  -webkit-backdrop-filter: blur(22px) saturate(135%);
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
   z-index: 10;
 }
 
 .panel h1 {
-  margin: 0 0 2px;
-  font-size: 17px;
-  letter-spacing: 0.3px;
+  margin: 0 0 3px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 30px;
+  letter-spacing: -0.5px;
+  line-height: 1;
 }
 
 .panel .subtitle {
-  margin: 0 0 16px;
-  font-size: 12px;
-  color: var(--text-dim);
+  margin: 0 0 14px;
+  font-size: 10.5px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
 .section-label {
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
-  letter-spacing: 0.8px;
-  color: var(--text-dim);
-  margin: 14px 0 7px;
+  letter-spacing: 1.6px;
+  color: var(--text-faint);
+  margin: 16px 0 8px;
 }
 
-/* Source / Destination mode toggle. */
 .mode-toggle {
   display: flex;
   gap: 8px;
@@ -93,38 +206,38 @@ body,
 .mode-toggle button {
   flex: 1;
   padding: 9px 0;
-  border-radius: 10px;
+  border-radius: 11px;
   border: 1px solid var(--panel-border);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.03);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12.5px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all 0.18s ease;
 }
 .mode-toggle button .dot {
   display: inline-block;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   margin-right: 6px;
   vertical-align: middle;
 }
 .mode-toggle button.active {
-  background: rgba(56, 232, 255, 0.14);
-  border-color: rgba(56, 232, 255, 0.55);
+  background: rgba(56, 232, 255, 0.12);
+  border-color: rgba(56, 232, 255, 0.5);
 }
 
 .endpoint-readout {
   font-size: 12px;
   color: var(--text-dim);
-  margin-top: 8px;
-  line-height: 1.5;
+  margin-top: 9px;
+  line-height: 1.55;
+  font-variant-numeric: tabular-nums;
 }
 .endpoint-readout span {
   color: var(--text);
 }
 
-/* Quick-pick demo routes. */
 .quick-picks {
   display: flex;
   flex-direction: column;
@@ -132,20 +245,21 @@ body,
 }
 .quick-picks button {
   text-align: left;
-  padding: 9px 11px;
-  border-radius: 10px;
+  padding: 10px 12px;
+  border-radius: 11px;
   border: 1px solid var(--panel-border);
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.025);
   color: var(--text);
   font-size: 12.5px;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: all 0.18s ease;
 }
 .quick-picks button:hover {
-  background: rgba(124, 92, 255, 0.16);
+  background: rgba(124, 92, 255, 0.14);
+  border-color: rgba(124, 92, 255, 0.4);
+  transform: translateX(2px);
 }
 
-/* Speed slider. */
 .slider-row {
   display: flex;
   align-items: center;
@@ -163,52 +277,40 @@ body,
   text-align: right;
 }
 
-/* Checkbox rows (3D toggles). */
-.check-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 12.5px;
-  color: var(--text);
-  margin-top: 9px;
-  cursor: pointer;
-}
-.check-row input[type="checkbox"] {
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
-  cursor: pointer;
-}
-
-/* Action buttons. */
 .actions {
   display: flex;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 18px;
 }
 .btn {
   flex: 1;
-  padding: 11px 0;
-  border-radius: 11px;
+  padding: 12px 0;
+  border-radius: 12px;
   border: none;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
+  letter-spacing: 0.3px;
   cursor: pointer;
-  transition: transform 0.08s ease, filter 0.15s ease;
+  transition: transform 0.08s ease, filter 0.18s ease, box-shadow 0.18s ease;
 }
 .btn:active {
   transform: translateY(1px);
 }
 .btn:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 .btn-run {
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #06121a;
+  box-shadow: 0 6px 22px rgba(56, 232, 255, 0.25);
+}
+.btn-run:not(:disabled):hover {
+  filter: brightness(1.08);
+  box-shadow: 0 8px 28px rgba(56, 232, 255, 0.4);
 }
 .btn-reset {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--text);
   border: 1px solid var(--panel-border);
   flex: 0 0 92px;
@@ -217,16 +319,16 @@ body,
 /* --- Metrics HUD ----------------------------------------------------------- */
 .metrics {
   position: absolute;
-  top: 18px;
-  right: 18px;
-  width: 230px;
-  padding: 16px 18px;
-  border-radius: 16px;
+  top: 22px;
+  right: 22px;
+  width: 234px;
+  padding: 18px 20px;
+  border-radius: 18px;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(22px) saturate(135%);
+  -webkit-backdrop-filter: blur(22px) saturate(135%);
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
   z-index: 10;
 }
 .metrics .section-label {
@@ -236,41 +338,45 @@ body,
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 7px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--hair);
 }
 .metric:last-child {
   border-bottom: none;
 }
 .metric .label {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-dim);
 }
 .metric .value {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   color: var(--accent);
+  letter-spacing: -0.2px;
 }
 
-/* Legend chips. */
 .legend {
   margin-top: 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 11.5px;
-  color: var(--text-dim);
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .legend .row {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.legend .swatch {
-  width: 14px;
-  height: 4px;
-  border-radius: 2px;
+
+.metrics-stage {
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 400;
+  margin: 1px 0 12px;
+  color: var(--text);
+  letter-spacing: -0.3px;
 }
 
 .loading {
@@ -298,38 +404,38 @@ code {
   font-size: 12px;
 }
 
-/* Panel hint under the action buttons (e.g. locked next stage). */
 .panel-hint {
-  margin-top: 10px;
-  font-size: 11.5px;
-  color: var(--text-dim);
+  margin-top: 11px;
+  font-size: 11px;
+  color: var(--text-faint);
   text-align: center;
-  letter-spacing: 0.2px;
+  letter-spacing: 0.4px;
 }
 
 /* --- Construction-sequence timeline --------------------------------------- */
 .timeline {
   position: absolute;
-  left: 18px;
-  bottom: 18px;
+  left: 22px;
+  bottom: 22px;
   width: 300px;
-  padding: 14px 16px;
-  border-radius: 16px;
+  padding: 16px 18px;
+  border-radius: 18px;
   background: var(--panel-bg);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(22px) saturate(135%);
+  -webkit-backdrop-filter: blur(22px) saturate(135%);
+  box-shadow: 0 10px 50px rgba(0, 0, 0, 0.5);
   z-index: 10;
 }
 .stage-row {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 7px 0;
+  gap: 12px;
+  padding: 8px 0;
+  transition: opacity 0.3s ease;
 }
 .stage-row.locked {
-  opacity: 0.42;
+  opacity: 0.4;
 }
 .stage-dot {
   flex: 0 0 22px;
@@ -343,9 +449,10 @@ code {
   font-size: 11px;
   color: #06121a;
   font-weight: 700;
+  transition: all 0.3s ease;
 }
 .stage-row.active .stage-dot {
-  box-shadow: 0 0 14px 1px currentColor;
+  box-shadow: 0 0 16px 1px currentColor;
 }
 .stage-text {
   min-width: 0;
@@ -355,58 +462,57 @@ code {
   color: var(--text);
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
 }
 .stage-model {
-  color: var(--text-dim);
-  font-size: 11.5px;
+  color: var(--text-faint);
+  font-size: 11px;
+  letter-spacing: 0.5px;
 }
 .stage-algo {
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text-faint);
   margin-top: 1px;
 }
 .stage-live {
-  font-size: 9.5px;
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.6px;
+  letter-spacing: 1px;
   padding: 1px 6px;
   border-radius: 6px;
-  background: rgba(120, 245, 150, 0.18);
+  background: rgba(120, 245, 150, 0.16);
   color: #9bffc0;
 }
 .stage-row.done .stage-title {
   color: var(--text-dim);
 }
 
-.metrics-stage {
-  font-size: 14px;
-  font-weight: 600;
-  margin: -2px 0 10px;
-  color: var(--text);
-}
-
 /* --- Compare card (the payoff) -------------------------------------------- */
 .compare-card {
   position: absolute;
   left: 50%;
-  bottom: 26px;
+  bottom: 28px;
   transform: translateX(-50%);
-  width: 460px;
+  width: 470px;
   max-width: calc(100vw - 36px);
-  padding: 20px 22px;
-  border-radius: 18px;
+  padding: 22px 24px;
+  border-radius: 20px;
   background: var(--panel-bg-solid);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(22px) saturate(135%);
+  -webkit-backdrop-filter: blur(22px) saturate(135%);
+  box-shadow: 0 16px 70px rgba(0, 0, 0, 0.62);
   z-index: 30;
+  animation: cardUp 600ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes cardUp {
+  from { opacity: 0; transform: transl(-50%, 18px); translate: -50% 18px; }
+  to { opacity: 1; transform: translateX(-50%); }
 }
 .compare-close {
   position: absolute;
   top: 12px;
-  right: 14px;
+  right: 16px;
   border: none;
   background: transparent;
   color: var(--text-dim);
@@ -415,18 +521,21 @@ code {
   cursor: pointer;
 }
 .compare-head h2 {
-  margin: 0 0 4px;
-  font-size: 19px;
+  margin: 0 0 5px;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 26px;
+  letter-spacing: -0.5px;
   background: linear-gradient(90deg, #38e8ff, #78f596);
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 .compare-head p {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   font-size: 12.5px;
   color: var(--text-dim);
-  line-height: 1.5;
+  line-height: 1.55;
 }
 .compare-table {
   width: 100%;
@@ -436,14 +545,15 @@ code {
 .compare-table th,
 .compare-table td {
   text-align: right;
-  padding: 7px 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--hair);
+  font-variant-numeric: tabular-nums;
 }
 .compare-table th {
-  font-size: 11px;
+  font-size: 10.5px;
   text-transform: uppercase;
-  letter-spacing: 0.6px;
-  color: var(--text-dim);
+  letter-spacing: 1px;
+  color: var(--text-faint);
 }
 .compare-table td:first-child,
 .compare-table th:first-child {
@@ -453,11 +563,10 @@ code {
 .compare-table .win {
   color: #9bffc0;
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
 }
 .compare-foot {
-  margin: 12px 0 0;
+  margin: 14px 0 0;
   font-size: 11.5px;
-  color: var(--text-dim);
-  line-height: 1.5;
+  color: var(--text-faint);
+  line-height: 1.55;
 }

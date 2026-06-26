@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "build-graph": "tsx scripts/build-graph.ts",
-    "build-water": "tsx scripts/build-water.ts"
+    "build-water": "tsx scripts/build-water.ts",
+    "build-ch": "tsx scripts/build-ch.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.0.40",

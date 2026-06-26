@@ -63,7 +63,7 @@ export default function Metrics({
 
       <div className="legend">
         <div className="row" style={{ opacity: 0.7 }}>
-          height = cost-from-source · {fmt(totalNodes)} nodes in model
+          colour = cost-from-source · {fmt(totalNodes)} nodes in model
         </div>
       </div>
     </div>

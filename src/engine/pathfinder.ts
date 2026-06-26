@@ -10,6 +10,7 @@ export { Graph } from "./graph";
 export { nearestNode } from "./nearest";
 export { DijkstraPathfinder } from "./dijkstra";
 export { AStarPathfinder } from "./astar";
+export { CHData, CHPathfinder } from "./ch";
 export type {
   Pathfinder,
   PathResult,
@@ -19,6 +20,7 @@ export type {
   RelaxedEdge,
   Edge,
   GraphJSON,
+  CHGraphJSON,
   LngLat,
 } from "./types";
 

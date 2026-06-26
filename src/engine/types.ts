@@ -31,6 +31,30 @@ export interface GraphJSON {
   edges: [number, number, number, number, number][];
 }
 
+/**
+ * The cached Contraction Hierarchies artefact produced by `scripts/build-ch.ts`
+ * and shipped as `public/bengaluru-ch.json`.
+ *
+ *  - level[i]  -> contraction rank of node i (0 = contracted first / least
+ *                 important; higher = more important). Strictly unique.
+ *  - edges[k]  -> [u, v, weightMeters, middle] of the AUGMENTED graph: every
+ *                 original road edge (middle = -1) plus every shortcut. A
+ *                 shortcut stores the `middle` node it bypasses, which is what
+ *                 lets the query unpack it back down to real road edges.
+ */
+export interface CHGraphJSON {
+  meta: {
+    generated: string;
+    nodeCount: number;
+    origEdgeCount: number;
+    augEdgeCount: number;
+    shortcutCount: number;
+    maxSettled: number;
+  };
+  level: number[];
+  edges: [number, number, number, number][];
+}
+
 /** One directed entry in a node's adjacency list. */
 export interface Edge {
   /** Destination node id. */
@@ -75,14 +99,23 @@ export interface ExploreStep {
   /** The node settled at this step. */
   node: number;
   /**
-   * g(node) — the final shortest cost-from-source of the settled node. This is
-   * the height signal for the 3D cost surface. (Recording it is a presentation
-   * concern; the algorithm already computes it as dist[u], so adding it here
-   * does not change how Dijkstra works.)
+   * The height signal for this step's geometry. For Dijkstra and A* this is
+   * g(node) — the cost-from-source — so the frontier rises as a cost surface.
+   * For Contraction Hierarchies (Stage 3) it is the node's LEVEL/importance, so
+   * the search visibly climbs the hierarchy instead. Either way the renderer
+   * just elevates by `cost`; the algorithm's meaning of it is what differs.
    */
   cost: number;
   /** Edges relaxed from `node` this step, used to draw the expanding frontier. */
   edges: RelaxedEdge[];
+  /**
+   * Optional render channel, used by Stage 3 to two-colour the bidirectional
+   * search and to flag the hierarchy-assembly beat:
+   *   0 = forward search (from source)   1 = backward search (from target)
+   *   2 = hierarchy assembly (shortcut arcs + level-raised landmark nodes)
+   * Dijkstra/A* leave it undefined (treated as a single accent colour).
+   */
+  dir?: number;
 }
 
 /** The full, ordered recording of a search — replayed by the UI frame by frame. */
@@ -108,6 +141,8 @@ export interface PathResult {
   log: ExplorationLog;
   /** Performance + result metrics. */
   stats: PathStats;
+  /** CH only: the node where the forward + backward searches met (for a marker). */
+  meetNode?: number;
 }
 
 /**

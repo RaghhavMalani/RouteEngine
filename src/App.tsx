@@ -5,20 +5,26 @@ import {
   type RoadEdge,
   type EdgeDatum,
   type NodeDatum,
+  type ArcDatum,
   type PathPt,
 } from "./map/layers";
 import ControlPanel, { type Mode } from "./ui/ControlPanel";
 import Metrics from "./ui/Metrics";
 import StageTimeline, { type StageStatus } from "./ui/StageTimeline";
 import CompareCard from "./ui/CompareCard";
+import Intro from "./ui/Intro";
 import { STAGES, isLocked } from "./stages";
 import { type QuickRoute } from "./places";
 import {
   Graph,
   nearestNode,
+  CHData,
+  CHPathfinder,
   type GraphJSON,
+  type CHGraphJSON,
   type LngLat,
   type PathResult,
+  type Pathfinder,
 } from "./engine/pathfinder";
 
 /** Phase of the staged build. */
@@ -36,11 +42,13 @@ interface FrameRoute {
 }
 
 const fmtCoord = (c: LngLat) => `${c[1].toFixed(4)}, ${c[0].toFixed(4)}`;
+const CH_STAGE = 2; // Stage 3 index
 
 export default function App() {
   const [graph, setGraph] = useState<Graph | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [water, setWater] = useState<number[][][]>([]);
+  const [chPathfinder, setChPathfinder] = useState<CHPathfinder | null>(null);
 
   const [mode, setMode] = useState<Mode>("source");
   const [sourceId, setSourceId] = useState<number | null>(null);
@@ -54,9 +62,29 @@ export default function App() {
   const [results, setResults] = useState<Record<number, PathResult>>({});
   const [anim, setAnim] = useState<AnimState>({ revealStep: 0, pathReveal: 0 });
   const [frameRoute, setFrameRoute] = useState<FrameRoute | null>(null);
+  const [focus, setFocus] = useState<{ coord: [number, number]; token: number } | null>(null);
+  const [framePath, setFramePath] = useState<
+    { min: [number, number]; max: [number, number]; token: number } | null
+  >(null);
   const [showCompare, setShowCompare] = useState(false);
+  const [showIntro, setShowIntro] = useState(true);
+  const [pulse, setPulse] = useState(0);
 
-  // --- Load graph + optional water ------------------------------------------
+  // Dissolve the intro title card after its animation finishes.
+  useEffect(() => {
+    const t = window.setTimeout(() => setShowIntro(false), 3000);
+    return () => window.clearTimeout(t);
+  }, []);
+
+  const chReady = chPathfinder !== null;
+
+  /** Stage 3's engine is supplied at runtime; others are static in STAGES. */
+  function pathfinderFor(stageIndex: number): Pathfinder | null {
+    if (stageIndex === CH_STAGE) return chPathfinder;
+    return STAGES[stageIndex].pathfinder;
+  }
+
+  // --- Load graph + optional water + CH cache --------------------------------
   useEffect(() => {
     const base = import.meta.env.BASE_URL;
     fetch(base + "bengaluru-graph.json")
@@ -67,7 +95,6 @@ export default function App() {
       .then((json) => setGraph(Graph.fromJSON(json)))
       .catch((e) => setLoadError(String(e)));
 
-    // Water is optional context; the app works without it (run scripts/build-water).
     fetch(base + "bengaluru-water.json")
       .then((r) => (r.ok ? r.json() : null))
       .then((gj) => {
@@ -81,6 +108,16 @@ export default function App() {
             for (const p of g.coordinates) polys.push(p[0]);
         }
         setWater(polys);
+      })
+      .catch(() => {});
+
+    // CH cache is optional: Stage 3 unlocks only once it has loaded.
+    fetch(base + "bengaluru-ch.json")
+      .then((r) => (r.ok ? (r.json() as Promise<CHGraphJSON>) : null))
+      .then((json) => {
+        if (json?.level && json.edges) {
+          setChPathfinder(new CHPathfinder(CHData.fromJSON(json)));
+        }
       })
       .catch(() => {});
   }, []);
@@ -103,24 +140,39 @@ export default function App() {
 
   // --- Precompute the active stage's drawable geometry (once per stage) -------
   const result = results[currentStage] ?? null;
+  const isCH = currentStage === CH_STAGE;
   const precomp = useMemo(() => {
     if (!result || !graph) return null;
     const edgeData: EdgeDatum[] = [];
     const nodeData: NodeDatum[] = [];
-    const cumulative: number[] = [0];
+    const arcData: ArcDatum[] = [];
+    // cumulative counters that exclude the CH hierarchy beat (dir === 2), so the
+    // HUD reports genuine search work in every stage.
+    const searchNodesCum: number[] = [0];
+    const searchEdgesCum: number[] = [0];
     let maxCost = 0;
 
     result.log.forEach((s, stepIndex) => {
       const [nx, ny] = graph.coords[s.node];
-      nodeData.push({ x: nx, y: ny, cost: s.cost, step: stepIndex });
+      nodeData.push({ x: nx, y: ny, cost: s.cost, step: stepIndex, dir: s.dir });
       if (s.cost > maxCost) maxCost = s.cost;
+
+      let frontierAdded = 0;
       for (const e of s.edges) {
+        if (e.toCost > maxCost) maxCost = e.toCost;
         const [sx, sy] = graph.coords[e.from];
         const [tx, ty] = graph.coords[e.to];
-        edgeData.push({ sx, sy, sCost: s.cost, tx, ty, tCost: e.toCost, step: stepIndex });
-        if (e.toCost > maxCost) maxCost = e.toCost;
+        if (s.dir === 2) {
+          if (e.from !== e.to)
+            arcData.push({ sx, sy, sCost: s.cost, tx, ty, tCost: e.toCost, step: stepIndex });
+        } else {
+          edgeData.push({ sx, sy, sCost: s.cost, tx, ty, tCost: e.toCost, step: stepIndex, dir: s.dir });
+          frontierAdded++;
+        }
       }
-      cumulative.push(edgeData.length);
+      const nNodes = searchNodesCum[searchNodesCum.length - 1] + (s.dir === 2 ? 0 : 1);
+      searchNodesCum.push(nNodes);
+      searchEdgesCum.push(searchEdgesCum[searchEdgesCum.length - 1] + frontierAdded);
     });
 
     const costByNode = new Map<number, number>();
@@ -130,19 +182,17 @@ export default function App() {
       return { x, y, cost: costByNode.get(id) ?? 0 };
     });
 
-    return { edgeData, nodeData, pathPts, cumulative, maxCost };
+    return { edgeData, nodeData, arcData, pathPts, searchNodesCum, searchEdgesCum, maxCost };
   }, [result, graph]);
 
   const logLen = result?.log.length ?? 0;
   const pathLen = precomp?.pathPts.length ?? 0;
 
   // --- Animation loop --------------------------------------------------------
-  // playing / in  → grow the reveal; out → retract it. The transition (out→in)
-  // is what makes the model "reform" from Dijkstra's flood into A*'s beam.
   useEffect(() => {
     if (!result || (phase !== "playing" && phase !== "in" && phase !== "out")) return;
     let raf = 0;
-    const retractStep = Math.max(2000, Math.ceil(logLen / 30)); // ~0.5s retract
+    const retractStep = Math.max(2000, Math.ceil(logLen / 30));
     const growStep = phase === "in" ? Math.max(speed, Math.ceil(logLen / 42)) : speed;
     const pathInc = phase === "in" ? 0.12 : 0.04 * (0.5 + speed / 120);
 
@@ -168,10 +218,21 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, [phase, result, speed, logLen, pathLen]);
 
+  // Flowing pulse of light travelling along the finished route (loops).
+  useEffect(() => {
+    if (phase !== "done" || pathLen < 2) return;
+    let raf = 0;
+    const tick = () => {
+      setPulse((p) => (p + 0.004) % 1);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [phase, pathLen]);
+
   // Phase transitions driven by the clock.
   useEffect(() => {
     if (phase === "out" && anim.revealStep <= 0) {
-      // Retract complete → swap to the next stage and regrow it.
       setCurrentStage((c) => c + 1);
       setAnim({ revealStep: 0, pathReveal: 0 });
       setPhase("in");
@@ -183,10 +244,25 @@ export default function App() {
       (pathLen < 2 || anim.pathReveal >= 1)
     ) {
       setPhase("done");
-      // Compare card appears once A* (stage index 1) has finished playing.
+      // Compare card: after A* (2-up) and again after CH (3-up).
       if (currentStage === 1 && results[0] && results[1]) setShowCompare(true);
+      if (currentStage === CH_STAGE && results[0] && results[1] && results[2])
+        setShowCompare(true);
+      // Zoom into the finished route so it reads clearly.
+      const rr = results[currentStage];
+      if (rr && rr.path.length >= 2 && graph) {
+        let a = Infinity, b = Infinity, c = -Infinity, d = -Infinity;
+        for (const id of rr.path) {
+          const [lng, lat] = graph.coords[id];
+          if (lng < a) a = lng;
+          if (lat < b) b = lat;
+          if (lng > c) c = lng;
+          if (lat > d) d = lat;
+        }
+        setFramePath({ min: [a, b], max: [c, d], token: Date.now() });
+      }
     }
-  }, [phase, anim, logLen, pathLen, currentStage, results]);
+  }, [phase, anim, logLen, pathLen, currentStage, results, graph]);
 
   // --- Actions ---------------------------------------------------------------
   function resetBuild() {
@@ -198,7 +274,7 @@ export default function App() {
   }
 
   function play(stageIndex: number, s: number, d: number, prev: Record<number, PathResult>) {
-    const pf = STAGES[stageIndex].pathfinder;
+    const pf = pathfinderFor(stageIndex);
     if (!pf || !graph) return;
     const res = pf.findPath(graph, s, d);
     setResults({ ...prev, [stageIndex]: res });
@@ -217,12 +293,20 @@ export default function App() {
   function handleNext() {
     const next = currentStage + 1;
     if (next >= STAGES.length || isLocked(STAGES[next]) || !graph) return;
+    if (STAGES[next].needsCH && !chReady) return;
     if (sourceId == null || destId == null) return;
-    // Compute the next stage now (same route), then retract → swap → regrow.
-    const res = STAGES[next].pathfinder!.findPath(graph, sourceId, destId);
+    const pf = pathfinderFor(next);
+    if (!pf) return;
+    const res = pf.findPath(graph, sourceId, destId);
     setResults((r) => ({ ...r, [next]: res }));
     setShowCompare(false);
     setPhase("out");
+    // Cinematic: re-frame the route as the model reforms into the next stage.
+    setFrameRoute({
+      source: graph.coords[sourceId],
+      dest: graph.coords[destId],
+      token: Date.now(),
+    });
   }
 
   function handleReplay() {
@@ -237,6 +321,8 @@ export default function App() {
     const id = nearestNode(graph, lng, lat);
     const label = fmtCoord(graph.coords[id]);
     resetBuild();
+    // Cinematic punch-in to the point just chosen.
+    setFocus({ coord: graph.coords[id] as [number, number], token: Date.now() });
     if (mode === "source") {
       setSourceId(id);
       setSourceLabel(label);
@@ -256,7 +342,7 @@ export default function App() {
     setSourceLabel(route.from.name);
     setDestLabel(route.to.name);
     setMode("source");
-    play(0, s, d, {}); // instant demo: set endpoints and build Stage 1
+    play(0, s, d, {});
   }
 
   function handleReset() {
@@ -267,6 +353,8 @@ export default function App() {
     setDestLabel("");
     setMode("source");
     setFrameRoute(null);
+    setFocus(null);
+    setFramePath(null);
   }
 
   // --- Build layers ----------------------------------------------------------
@@ -278,12 +366,19 @@ export default function App() {
         ? {
             edgeData: precomp.edgeData,
             nodeData: precomp.nodeData,
+            arcData: precomp.arcData,
             pathPts: precomp.pathPts,
             maxCost: precomp.maxCost,
             revealStep: Math.min(Math.max(0, anim.revealStep), logLen),
             pathReveal: anim.pathReveal,
             opacity: 1,
             accent: stage.accent,
+            chMode: isCH,
+            pulse,
+            meetPoint:
+              isCH && result.meetNode != null
+                ? (graph.coords[result.meetNode] as [number, number])
+                : null,
           }
         : null;
 
@@ -305,6 +400,8 @@ export default function App() {
     anim,
     logLen,
     currentStage,
+    isCH,
+    pulse,
     sourceId,
     destId,
     sourceLabel,
@@ -321,6 +418,7 @@ export default function App() {
 
   const statuses: StageStatus[] = STAGES.map((s, i) => {
     if (isLocked(s)) return "locked";
+    if (s.needsCH && !chReady) return "locked"; // Stage 3 before the cache loads
     if (i < currentStage) return "done";
     if (i === currentStage)
       return phase === "done" ? "done" : phase === "idle" ? "available" : "active";
@@ -333,14 +431,20 @@ export default function App() {
   let onPrimary = handleBuild;
   let hint: string | null = null;
 
+  const shortAlgo = (a: string) => (a === "Contraction Hierarchies" ? "CH" : a);
+
   if (busy) {
     primaryLabel = phase === "out" || phase === "in" ? "Reforming…" : "Building…";
     primaryEnabled = false;
     onPrimary = () => {};
   } else if (phase === "done") {
     const next = currentStage + 1;
-    if (next < STAGES.length && !isLocked(STAGES[next])) {
-      primaryLabel = `Next → ${STAGES[next].algo}`;
+    const nextAvailable =
+      next < STAGES.length &&
+      !isLocked(STAGES[next]) &&
+      (!STAGES[next].needsCH || chReady);
+    if (nextAvailable) {
+      primaryLabel = `Next → ${shortAlgo(STAGES[next].algo)}`;
       primaryEnabled = true;
       onPrimary = handleNext;
     } else {
@@ -351,7 +455,6 @@ export default function App() {
         hint = `${STAGES[next].model} · ${STAGES[next].algo} — coming next`;
     }
   } else {
-    // idle
     primaryLabel = "Build";
     primaryEnabled = sourceId != null && destId != null;
     onPrimary = handleBuild;
@@ -376,8 +479,24 @@ export default function App() {
 
   return (
     <>
-      <MapView layers={layers} frameRoute={frameRoute} onMapClick={handleMapClick} />
+      <MapView
+        layers={layers}
+        frameRoute={frameRoute}
+        focus={focus}
+        framePath={framePath}
+        onMapClick={handleMapClick}
+      />
       <div className="stage-vignette" />
+
+      {phase === "idle" && (
+        <div
+          className="select-hint"
+          style={{ ["--sel-color" as string]: mode === "source" ? "#46f08c" : "#ff5f8c" }}
+        >
+          <span className="sel-dot" /> Click the model to place{" "}
+          <b>{mode === "source" ? "source" : "destination"}</b> · scroll to zoom
+        </div>
+      )}
 
       <ControlPanel
         mode={mode}
@@ -401,8 +520,8 @@ export default function App() {
         stageName={result ? stage.name : null}
         algo={result ? stage.algo : null}
         accent={stage.accent}
-        nodesExplored={k}
-        edgesRelaxed={precomp ? precomp.cumulative[k] : 0}
+        nodesExplored={precomp ? precomp.searchNodesCum[k] : 0}
+        edgesRelaxed={precomp ? precomp.searchEdgesCum[k] : 0}
         distanceKm={distanceKm}
         computeTimeMs={result ? result.stats.computeTimeMs : null}
         totalNodes={graph.nodeCount}
@@ -412,9 +531,12 @@ export default function App() {
         <CompareCard
           dijkstra={results[0].stats}
           astar={results[1].stats}
+          ch={results[2]?.stats ?? null}
           onClose={() => setShowCompare(false)}
         />
       )}
+
+      {showIntro && <Intro />}
     </>
   );
 }

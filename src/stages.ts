@@ -23,6 +23,14 @@ export interface Stage {
   blurb: string;
   /** The engine that plays this stage, or null if it's locked/coming. */
   pathfinder: Pathfinder | null;
+  /**
+   * True for Stage 3: its pathfinder isn't constructed statically because it
+   * needs the cached CH artefact (public/bengaluru-ch.json) loaded at runtime.
+   * App supplies the CHPathfinder once that file has loaded; until then the stage
+   * shows as locked. (Stage 4 has neither a pathfinder nor this flag → it stays
+   * permanently locked / "coming".)
+   */
+  needsCH?: boolean;
   /** Frontier accent colour (RGB 0–255) — Dijkstra's flood vs A*'s beam differ. */
   accent: [number, number, number];
 }
@@ -48,8 +56,9 @@ export const STAGES: Stage[] = [
     model: "Model 3",
     name: "Production",
     algo: "Contraction Hierarchies",
-    blurb: "Precompute shortcuts for near-instant queries. (Coming next.)",
-    pathfinder: null, // locked
+    blurb: "Precomputed shortcuts let the query skip huge regions and barely search.",
+    pathfinder: null, // supplied at runtime once the CH cache loads (needsCH)
+    needsCH: true,
     accent: [180, 160, 255],
   },
   {
@@ -62,4 +71,9 @@ export const STAGES: Stage[] = [
   },
 ];
 
-export const isLocked = (s: Stage): boolean => s.pathfinder === null;
+/**
+ * Permanently locked / "coming" = no engine AND not the CH stage. Stage 3
+ * (needsCH) is not permanently locked — App enables it once the CH cache loads;
+ * Stage 4 has neither, so it stays locked.
+ */
+export const isLocked = (s: Stage): boolean => s.pathfinder === null && !s.needsCH;

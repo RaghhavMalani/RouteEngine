@@ -9,8 +9,12 @@ architectural fly-through where a building goes foundation → skeleton → fini
 
 Pick a source and destination, press **Build**, and watch **Stage 1 (Dijkstra)**
 flood outward in every direction. Press **Next** and the model *reforms* into
-**Stage 2 (A\*)** — a focused beam aimed at the goal — then a compare card shows the
-payoff: same optimal route, a fraction of the work.
+**Stage 2 (A\*)** — a focused beam aimed at the goal. Press **Next** again to reach
+**Stage 3 (Contraction Hierarchies)** — the "production" model that assembles into a
+layered hierarchy and then barely searches: two short funnels climb from the source
+and the target and meet in the middle, touching a few hundred nodes instead of a
+hundred thousand. A three-way compare card shows the payoff: same optimal route, a
+tiny fraction of the work.
 
 ---
 
@@ -23,17 +27,20 @@ before. The route never changes — only how cleverly we search for it.
 | --- | --- | --- |
 | **Model 1 — Brute Force** | Dijkstra | available |
 | **Model 2 — Guided Search** | A\* (admissible heuristic) | available |
-| **Model 3 — Production** | Contraction Hierarchies | locked (coming) |
+| **Model 3 — Production** | Contraction Hierarchies | available |
 | **Model 4 — What You Actually See** | clean route + ETA | locked (coming) |
 
-Locked stages render greyed with a lock — they double as a visible roadmap.
+The one remaining locked stage renders greyed with a lock — it doubles as a visible
+roadmap. (Stage 3 shows locked only until its precomputed CH cache finishes loading.)
 
-**Height = g(n).** In both live stages, every explored node and edge is lifted off
-the ground by its **cost-from-source** `g(n)`. This makes the *method* visible:
-Dijkstra rises as a smooth, **symmetric dome** centred on the source (it explores by
-increasing cost, uniformly in all directions). A\* rises as a narrow, **directed
-ridge** running toward the goal. The reform animation between stages retracts the
-dome and regrows the ridge over ~1.2s — the "construction" beat.
+**Height encodes the method.** In Stages 1–2, every explored node and edge is lifted
+off the ground by its **cost-from-source** `g(n)`. Dijkstra rises as a smooth,
+**symmetric dome** centred on the source (it explores by increasing cost, uniformly in
+all directions); A\* rises as a narrow, **directed ridge** running toward the goal. In
+**Stage 3, height instead encodes a node's LEVEL / importance**, so arterial high-level
+roads lift toward the top and the graph reads as a layered hierarchy — the search then
+visibly *climbs* it. The reform animation between stages retracts the old shape and
+regrows the new one over ~1.2s — the "construction" beat.
 
 ### Stage 1 → Stage 2: why A\* is the refinement
 
@@ -49,14 +56,55 @@ works with no re-expansions.
 
 On the demo route **Electronic City → Whitefield**, measured on the real graph:
 
-| | Dijkstra | A\* |
-| --- | --- | --- |
-| Nodes explored | 96,830 | **13,554** |
-| Edges relaxed | 107,667 | **15,145** |
-| Route distance | 20.95 km | 20.95 km |
+| | Dijkstra | A\* | CH |
+| --- | --- | --- | --- |
+| Nodes explored | 96,830 | 13,554 | **846** |
+| Route distance | 20.95 km | 20.95 km | 20.95 km |
 
-Same 20.95 km path — A\* just reached it exploring **~14% of the nodes**. That is the
-whole point of the heuristic, made visible.
+Same 20.95 km path every time — A\* reached it exploring ~14% of Dijkstra's nodes, and
+Contraction Hierarchies reached it touching **846 nodes (~0.9%)**. Escalating method,
+identical answer, dramatically less work.
+
+### Stage 2 → Stage 3: Contraction Hierarchies (the production model)
+
+A\* is cleverer than Dijkstra, but it still searches *live* over the raw road graph. A
+real routing service does most of the work **ahead of time**. Contraction Hierarchies
+(CH) is the classic technique for that, and it is what Stage 3 makes visible.
+
+**Offline — preprocessing (`scripts/build-ch.ts`, run once).** We rank every node by
+*importance* and "contract" them one at a time from least to most important. Contracting
+a node `v` means removing it and, for any pair of its neighbours whose shortest path went
+through `v`, adding a **shortcut edge** that preserves that distance — labelled with the
+node it bypasses. To decide whether a shortcut is actually needed we run a **witness
+search**: a small local Dijkstra from one neighbour that looks for an alternative path no
+longer than the shortcut. If one exists, no shortcut is added. Node order is chosen with a
+**lazy priority queue** keyed by *edge difference* (shortcuts a contraction would add minus
+the edges it removes), plus a contracted-neighbours term to spread the order out. Each node
+also records its **level** (its contraction rank). The result — original edges + shortcuts +
+levels — is cached to `public/bengaluru-ch.json`.
+
+**Online — the query (`src/engine/ch.ts`).** A query is a **bidirectional** search: one
+Dijkstra climbs *up* the hierarchy from the source, another climbs *up* from the target,
+and **each side only ever relaxes edges to a strictly higher level**. Because both sides
+move only upward, they each explore a small funnel and meet near the top. We track the
+**meeting node** that minimises forward + backward distance, then walk back through both
+parent trees to get the path in shortcut space. Finally we **unpack** each shortcut
+recursively — replacing it with its two halves via the stored middle node — down to
+original road edges, so the displayed ribbon follows **real Bengaluru roads**, never a
+straight shortcut line.
+
+**Why it's still optimal.** A correct contraction never changes shortest-path distances:
+every shortcut equals the path it replaces, and the upward-only bidirectional search is a
+theorem-backed property of the hierarchy. We don't take that on faith — a **correctness
+gate** runs 200 random source/target pairs through both plain Dijkstra and the CH query;
+distances match **exactly** (max error `0`), and every unpacked route is a contiguous chain
+of real edges whose length equals the true shortest distance.
+
+**Honest caveats (interview-ready).** The node ordering is a *heuristic* and the witness
+search is *bounded* (capped at a few hundred settled nodes), so a few unnecessary shortcuts
+get added — standard CH engineering. On this graph preprocessing takes **~8s** and adds
+**~270k shortcuts** (≈1× the original edge count). That doesn't affect correctness; a
+slightly larger hierarchy just means a few extra edges, never a wrong or longer route.
 
 ---
 
@@ -162,10 +210,11 @@ interface Pathfinder {
 }
 ```
 
-`DijkstraPathfinder` (Stage 1) and `AStarPathfinder` (Stage 2) are *two
-implementations of this same interface*; Contraction Hierarchies will be a third. The
-staged UI just asks each stage's pathfinder for a result — swapping algorithms never
-touches the rendering or animation code.
+`DijkstraPathfinder` (Stage 1), `AStarPathfinder` (Stage 2), and `CHPathfinder`
+(Stage 3) are *three implementations of this same interface*. The staged UI just asks
+each stage's pathfinder for a result — swapping algorithms never touches the rendering
+or animation code, which is exactly why CH dropped in by reusing the same exploration
+log and animation pipeline as the other two.
 
 ---
 
@@ -191,6 +240,13 @@ holds a fixed pitch and **slowly, continuously orbits**, like a lit display tabl
 - **The reform.** Advancing Stage 1 → 2 retracts Dijkstra's reveal back to zero, swaps
   in A\*'s precomputed geometry, and regrows it — a ~1.2s morph from flood to beam,
   driven entirely by that same filter bound and an `opacity` uniform.
+- **Stage 3 reads differently on purpose.** Height switches to node *level*, so the
+  reveal first assembles a stylised hierarchy — level-raised landmark nodes plus a
+  capped sample of shortcut **arcs** (deck.gl `ArcLayer`) sweeping over the city — and
+  then plays the bidirectional query in **two colours** (forward from source, backward
+  from target) climbing to their meeting node, with the unpacked real-road route as the
+  bright hero ribbon. Sampling the arcs/landmarks (not all ~270k shortcuts) is what
+  keeps the build beat at 60fps.
 
 ---
 
@@ -220,6 +276,7 @@ Requires Node 18+ and an internet connection for the one-time graph build.
 ```bash
 npm install          # install dependencies
 npm run build-graph  # ONE-TIME: fetch Bengaluru roads from Overpass, build the graph
+npm run build-ch     # ONE-TIME: precompute the Contraction Hierarchies (~8s) for Stage 3
 npm run build-water  # OPTIONAL: faint water bodies for context (app runs without it)
 npm run dev          # start Vite; open the printed localhost URL
 ```
@@ -239,10 +296,12 @@ Karnataka extract.
 
 Once the app is open: pick **Source** / **Destination** mode and click the model to
 place endpoints (or hit a **quick-pick route** like *Electronic City → Whitefield*,
-which builds Stage 1 instantly). Press **Build** to play **Stage 1 (Dijkstra)**, then
-**Next → A\*** to watch the model reform into **Stage 2**, after which the **compare
-card** shows the Dijkstra-vs-A\* numbers. The **speed** slider controls the reveal
-rate. Models 3–4 are shown locked on the timeline as the roadmap.
+which builds Stage 1 instantly). Press **Build** to play **Stage 1 (Dijkstra)**,
+**Next → A\*** to watch the model reform into **Stage 2**, and **Next → CH** to reform
+into **Stage 3 (Contraction Hierarchies)** — the hierarchy assembles, then the
+bidirectional search meets in the middle and the **three-way compare card** shows the
+Dijkstra-vs-A\*-vs-CH numbers. The **speed** slider controls the reveal rate. Model 4
+remains locked on the timeline as the roadmap.
 
 ---
 
@@ -250,8 +309,10 @@ rate. Models 3–4 are shown locked on the timeline as the roadmap.
 
 ```
 scripts/build-graph.ts      OSM → graph pipeline (run once)
+scripts/build-ch.ts         Contraction Hierarchies preprocessing (run once)
 scripts/build-water.ts      OSM → water polygons (optional context)
 public/bengaluru-graph.json  generated graph (created by build-graph)
+public/bengaluru-ch.json     augmented graph + levels + shortcuts (created by build-ch)
 
 src/engine/                 pure TypeScript routing engine (no UI imports)
   types.ts                    shared types + the Pathfinder interface
@@ -259,11 +320,12 @@ src/engine/                 pure TypeScript routing engine (no UI imports)
   heap.ts                     binary min-heap priority queue
   dijkstra.ts                 Stage 1: Dijkstra + exploration log + stats
   astar.ts                    Stage 2: A* (g + haversine h), same interface
+  ch.ts                       Stage 3: CH query (bidirectional + unpacking)
   nearest.ts                  snap a clicked lng/lat to the closest node
   geo.ts                      haversine distance (used as weight AND A* heuristic)
   pathfinder.ts               public barrel + Pathfinder interface
 
-src/stages.ts               the staged sequence (Models 1–4; 3–4 locked)
+src/stages.ts               the staged sequence (Models 1–3 available; 4 locked)
 
 src/map/
   MapView.tsx                 blank dark stage + deck.gl model + orbit camera
@@ -300,14 +362,20 @@ must match exactly), plus hand-built graphs and unreachable-target cases. **A\**
 validated against Dijkstra on planar graphs (where the haversine heuristic is
 admissible): identical path lengths in every trial — proving optimality — while
 exploring far fewer nodes (≈22% on average; ≈14% on the Electronic City → Whitefield
-city route). The build pipeline's intersection-collapse and largest-component logic
-were validated on a synthetic OSM payload with a known topology.
+city route). **Contraction Hierarchies** passes a mandatory correctness gate before it
+is ever used: 200 random source/target pairs are solved with both plain Dijkstra and
+the CH query, and the distances match **exactly** (max error `0`); additionally every
+unpacked CH route is checked to be a contiguous chain of real road edges whose summed
+length equals the true shortest distance (also exact). The build pipeline's
+intersection-collapse and largest-component logic were validated on a synthetic OSM
+payload with a known topology.
 
 ---
 
 ## Roadmap
 
-- **Model 3 — Contraction Hierarchies:** precomputed shortcuts for near-instant queries.
 - **Model 4 — Production presentation:** the clean route + ETA a rider actually sees.
 - Directed graph honouring one-ways and turn restrictions.
 - Travel-time weights and live traffic; dynamic rerouting.
+
+(**Model 3 — Contraction Hierarchies** is now built — see the Stage 2 → 3 section above.)
