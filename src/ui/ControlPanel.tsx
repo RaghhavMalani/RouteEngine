@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { QUICK_ROUTES, type QuickRoute } from "../places";
 
 export type Mode = "source" | "destination";
@@ -5,6 +6,9 @@ export type Mode = "source" | "destination";
 interface ControlPanelProps {
   mode: Mode;
   onModeChange: (m: Mode) => void;
+  onSearch: (query: string) => void;
+  searching: boolean;
+  searchErr: string | null;
   sourceLabel: string;
   destLabel: string;
   speed: number;
@@ -30,6 +34,9 @@ interface ControlPanelProps {
 export default function ControlPanel({
   mode,
   onModeChange,
+  onSearch,
+  searching,
+  searchErr,
   sourceLabel,
   destLabel,
   speed,
@@ -43,12 +50,36 @@ export default function ControlPanel({
   onPlayDemo,
   demoEnabled,
 }: ControlPanelProps) {
+  const [query, setQuery] = useState("");
+
   return (
     <div className="panel">
       <h1>RouteEngine</h1>
       <p className="subtitle">Bengaluru routing · a construction sequence</p>
 
-      <div className="section-label">Set endpoints — click the model</div>
+      <div className="section-label">
+        Search a place — sets {mode === "source" ? "source" : "destination"}
+      </div>
+      <form
+        className="search-row"
+        onSubmit={(e) => {
+          e.preventDefault();
+          onSearch(query);
+        }}
+      >
+        <input
+          type="text"
+          value={query}
+          placeholder="e.g. Koramangala, MG Road…"
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button type="submit" disabled={searching || !query.trim()}>
+          {searching ? "…" : "Go"}
+        </button>
+      </form>
+      {searchErr && <div className="search-err">{searchErr}</div>}
+
+      <div className="section-label">Or set endpoints — click the model</div>
       <div className="mode-toggle">
         <button
           className={mode === "source" ? "active" : ""}
@@ -85,7 +116,7 @@ export default function ControlPanel({
         <input
           type="range"
           min={1}
-          max={400}
+          max={120}
           step={1}
           value={speed}
           onChange={(e) => onSpeedChange(Number(e.target.value))}

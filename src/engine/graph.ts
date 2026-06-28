@@ -26,10 +26,11 @@ export class Graph {
   /**
    * Rehydrate a Graph from the compact JSON shipped in /public.
    *
-   * PHASE 0 SIMPLIFICATION: every edge is added in BOTH directions, regardless of
-   * its `oneway` flag, so the graph is effectively undirected. This keeps Phase 0
-   * about the algorithm rather than turn restrictions; the oneway flag is still
-   * stored on each Edge so a later phase can switch to a true directed graph.
+   * DIRECTED: the `oneway` flag is honoured — a one-way street is added only in its
+   * legal direction, a two-way street in both. This is what makes routing
+   * *drivable* (no wrong-way travel, and divided roads/medians force the real
+   * U-turn) instead of just geometrically shortest. (Explicit turn restrictions —
+   * "no right turn" relations — are a further step that needs extra OSM data.)
    */
   static fromJSON(data: GraphJSON): Graph {
     const coords: LngLat[] = data.nodes.map(([lng, lat]) => [lng, lat]);
@@ -38,9 +39,8 @@ export class Graph {
     for (const [u, v, length, highwayIdx, oneway] of data.edges) {
       const highway = data.meta.highwayTypes[highwayIdx] ?? "unknown";
       const ow = oneway === 1;
-      // Forward and reverse — see the simplification note above.
       adj[u].push({ to: v, length, highway, oneway: ow });
-      adj[v].push({ to: u, length, highway, oneway: ow });
+      if (!ow) adj[v].push({ to: u, length, highway, oneway: ow });
     }
 
     return new Graph(coords, adj);

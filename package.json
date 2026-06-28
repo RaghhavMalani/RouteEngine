@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "build-graph": "tsx scripts/build-graph.ts",
     "build-water": "tsx scripts/build-water.ts",
-    "build-ch": "tsx scripts/build-ch.ts"
+    "build-ch": "tsx scripts/build-ch.ts",
+    "build-turns": "tsx scripts/build-turn-restrictions.ts"
   },
   "dependencies": {
     "@deck.gl/core": "^9.0.40",

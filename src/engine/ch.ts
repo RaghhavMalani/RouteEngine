@@ -9,29 +9,22 @@ import type {
 } from "./types";
 
 /**
- * Contraction Hierarchies — the "production" query (Stage 3).
+ * Contraction Hierarchies — the "production" query (Stage 3), now DIRECTED so it
+ * respects one-way streets (and the divided-road U-turns that follow from them).
  *
- * CH is a two-part technique. OFFLINE (scripts/build-ch.ts) we contract nodes
- * one by one in increasing order of importance; when a node is removed we add
- * "shortcut" edges that preserve shortest distances between its neighbours, each
- * shortcut remembering the node it bypasses. ONLINE (this file) a query becomes a
- * BIDIRECTIONAL search that only ever moves UPWARD in the hierarchy — from the
- * source climbing up, from the target climbing up — until the two frontiers meet.
- * Because both sides only relax edges to strictly higher levels, each search
- * touches a tiny, funnel-shaped slice of the graph instead of flooding it.
- *
- * The answer is identical to Dijkstra's (the correctness gate proves this on 200
- * random pairs, exact match). The displayed route is recovered by UNPACKING each
- * shortcut on the meeting path recursively into its two halves, all the way down
- * to original road edges — so the ribbon follows real Bengaluru roads, never a
- * straight shortcut line.
+ * Offline (scripts/build-ch.ts) we contract nodes by importance and add directed
+ * shortcut edges (each remembers the node it bypasses). Online, a query is a
+ * BIDIRECTIONAL upward search: a FORWARD search from the source over out-edges that
+ * climb the hierarchy, and a BACKWARD search from the target over in-edges (the
+ * reverse graph) that also climb — they meet near the top. The answer is identical
+ * to a directed Dijkstra (proven by a 200-pair correctness gate). Shortcuts on the
+ * meeting path are unpacked recursively into real, legally-directed road edges.
  */
 
 const FWD = 0;
 const BWD = 1;
 const HIER = 2;
 
-/** Caps for the stylised hierarchy-assembly beat (kept small + elegant, not a web). */
 const MAX_ARCS = 130;
 const MAX_LANDMARKS = 1300;
 
@@ -39,17 +32,19 @@ export class CHData {
   readonly level: Int32Array;
   readonly nodeCount: number;
 
-  /** Upward adjacency (CSR): only edges that go to a strictly higher level. */
-  readonly upOff: Int32Array;
-  readonly upTo: Int32Array;
-  readonly upW: Float64Array;
+  /** Forward up-graph (out-edges to a higher level) — for the source search. */
+  readonly fOff: Int32Array;
+  readonly fTo: Int32Array;
+  readonly fW: Float64Array;
+  /** Backward up-graph (reverse of in-edges from a higher level) — target search. */
+  readonly bOff: Int32Array;
+  readonly bTo: Int32Array;
+  readonly bW: Float64Array;
 
-  /** Unpacking table: key(a,b) -> middle node of that (shortcut) edge, or -1. */
+  /** Directed unpacking table: key(a→b) -> middle node (or -1 for an original edge). */
   private readonly midOf: Map<number, number>;
-  private readonly wOf: Map<number, number>;
   private readonly nForKey: number;
 
-  /** Precomputed stylised hierarchy beat (built once). */
   readonly arcs: { a: number; b: number }[];
   readonly landmarks: number[];
 
@@ -58,53 +53,50 @@ export class CHData {
     this.nodeCount = n;
     this.nForKey = n;
     this.level = Int32Array.from(json.level);
+    const lvl = this.level;
 
-    // Build upward CSR + unpacking maps in one pass over augmented edges.
-    const updeg = new Int32Array(n);
-    for (const [a, b] of json.edges) {
-      if (this.level[a] < this.level[b]) updeg[a]++;
-      else updeg[b]++;
+    const fdeg = new Int32Array(n);
+    const bdeg = new Int32Array(n);
+    for (const [u, v] of json.edges) {
+      if (lvl[v] > lvl[u]) fdeg[u]++;
+      if (lvl[u] > lvl[v]) bdeg[v]++;
     }
-    this.upOff = new Int32Array(n + 1);
-    for (let i = 0; i < n; i++) this.upOff[i + 1] = this.upOff[i] + updeg[i];
-    this.upTo = new Int32Array(this.upOff[n]);
-    this.upW = new Float64Array(this.upOff[n]);
-    const cur = this.upOff.slice(0, n);
+    this.fOff = new Int32Array(n + 1);
+    this.bOff = new Int32Array(n + 1);
+    for (let i = 0; i < n; i++) {
+      this.fOff[i + 1] = this.fOff[i] + fdeg[i];
+      this.bOff[i + 1] = this.bOff[i] + bdeg[i];
+    }
+    this.fTo = new Int32Array(this.fOff[n]);
+    this.fW = new Float64Array(this.fOff[n]);
+    this.bTo = new Int32Array(this.bOff[n]);
+    this.bW = new Float64Array(this.bOff[n]);
+    const fc = this.fOff.slice(0, n);
+    const bc = this.bOff.slice(0, n);
 
     this.midOf = new Map();
-    this.wOf = new Map();
     const arcCandidates: { a: number; b: number; lvl: number }[] = [];
 
     for (const [a, b, w, mid] of json.edges) {
-      const key = this.key(a, b);
-      // keep the lighter parallel edge for unpacking + its middle
-      const prev = this.wOf.get(key);
-      if (prev === undefined || w < prev) {
-        this.wOf.set(key, w);
-        this.midOf.set(key, mid);
+      const key = a * this.nForKey + b; // directed
+      const prev = this.midOf.get(key);
+      if (prev === undefined) this.midOf.set(key, mid);
+      if (lvl[b] > lvl[a]) {
+        this.fTo[fc[a]] = b;
+        this.fW[fc[a]++] = w;
       }
-      if (this.level[a] < this.level[b]) {
-        this.upTo[cur[a]] = b;
-        this.upW[cur[a]++] = w;
-      } else {
-        this.upTo[cur[b]] = a;
-        this.upW[cur[b]++] = w;
+      if (lvl[a] > lvl[b]) {
+        this.bTo[bc[b]] = a;
+        this.bW[bc[b]++] = w;
       }
-      if (mid !== -1) {
-        const lvl = Math.min(this.level[a], this.level[b]);
-        arcCandidates.push({ a, b, lvl });
-      }
+      if (mid !== -1) arcCandidates.push({ a, b, lvl: Math.min(lvl[a], lvl[b]) });
     }
 
-    // Sample the highest shortcuts as representative arcs for the build beat.
     arcCandidates.sort((p, q) => q.lvl - p.lvl);
-    this.arcs = arcCandidates
-      .slice(0, MAX_ARCS)
-      .map(({ a, b }) => ({ a, b }));
+    this.arcs = arcCandidates.slice(0, MAX_ARCS).map(({ a, b }) => ({ a, b }));
 
-    // Sample landmark nodes across the top of the hierarchy.
     const byLevel = Array.from({ length: n }, (_, i) => i);
-    byLevel.sort((p, q) => this.level[q] - this.level[p]);
+    byLevel.sort((p, q) => lvl[q] - lvl[p]);
     this.landmarks = byLevel.slice(0, MAX_LANDMARKS);
   }
 
@@ -112,16 +104,11 @@ export class CHData {
     return new CHData(json);
   }
 
-  private key(a: number, b: number): number {
-    return a < b ? a * this.nForKey + b : b * this.nForKey + a;
-  }
-
-  /** Recursively expand a (possibly shortcut) edge a→b into real road nodes. */
+  /** Recursively expand a (possibly shortcut) directed edge a→b into road nodes. */
   unpack(a: number, b: number, out: number[]): void {
-    const key = this.key(a, b);
-    const mid = this.midOf.get(key);
+    const mid = this.midOf.get(a * this.nForKey + b);
     if (mid === undefined || mid === -1) {
-      out.push(b); // original edge
+      out.push(b);
       return;
     }
     this.unpack(a, mid, out);
@@ -133,13 +120,18 @@ interface SideResult {
   dist: Float64Array;
   parent: Int32Array;
   settled: number;
-  relaxations: number; // edges that actually improved a distance (the real "work")
+  relaxations: number;
   order: { node: number; g: number }[];
 }
 
-/** One direction of the upward bidirectional search (records its settle order). */
-function searchUp(ch: CHData, src: number): SideResult {
-  const n = ch.nodeCount;
+/** One direction of the upward search over the given CSR adjacency. */
+function searchUp(
+  n: number,
+  off: Int32Array,
+  to: Int32Array,
+  w: Float64Array,
+  src: number,
+): SideResult {
   const dist = new Float64Array(n).fill(Infinity);
   const parent = new Int32Array(n).fill(-1);
   const done = new Uint8Array(n);
@@ -158,9 +150,9 @@ function searchUp(ch: CHData, src: number): SideResult {
     done[u] = 1;
     settled++;
     order.push({ node: u, g: d });
-    for (let i = ch.upOff[u]; i < ch.upOff[u + 1]; i++) {
-      const v = ch.upTo[i];
-      const nd = d + ch.upW[i];
+    for (let i = off[u]; i < off[u + 1]; i++) {
+      const v = to[i];
+      const nd = d + w[i];
       if (nd < dist[v]) {
         dist[v] = nd;
         parent[v] = u;
@@ -182,15 +174,14 @@ export class CHPathfinder implements Pathfinder {
 
   findPath(_graph: Graph, sourceId: number, targetId: number): PathResult {
     const ch = this.ch;
+    const n = ch.nodeCount;
     const start = performance.now();
 
-    const F = searchUp(ch, sourceId);
-    const B = searchUp(ch, targetId);
+    const F = searchUp(n, ch.fOff, ch.fTo, ch.fW, sourceId);
+    const B = searchUp(n, ch.bOff, ch.bTo, ch.bW, targetId);
 
-    // Meeting node: minimises forward + backward distance.
     let meet = -1;
     let best = Infinity;
-    // Only nodes touched by the smaller search need checking.
     const scan = F.order.length < B.order.length ? F.order : B.order;
     for (const { node: x } of scan) {
       if (F.dist[x] !== Infinity && B.dist[x] !== Infinity) {
@@ -202,10 +193,8 @@ export class CHPathfinder implements Pathfinder {
       }
     }
 
-    // Up-path source→meet and meet→target (still in shortcut space).
     const upPath = meet === -1 ? [] : buildUpPath(F.parent, sourceId, meet, B.parent, targetId);
 
-    // Unpack to real road nodes for the displayed ribbon.
     const path: number[] = [];
     if (upPath.length > 0) {
       path.push(upPath[0]);
@@ -213,7 +202,6 @@ export class CHPathfinder implements Pathfinder {
     }
 
     const computeTimeMs = performance.now() - start;
-
     const edgesRelaxed = F.relaxations + B.relaxations;
     const log = buildLog(ch, F, B);
 
@@ -231,7 +219,11 @@ export class CHPathfinder implements Pathfinder {
   }
 }
 
-/** Reconstruct source→meet→target through the two parent trees. */
+/**
+ * Reconstruct source→meet→target. Forward parents are predecessors (walk back from
+ * meet to source). Backward parents are *successors toward the target* (walk
+ * forward from meet to target), since the backward search ran on the reverse graph.
+ */
 function buildUpPath(
   fParent: Int32Array,
   source: number,
@@ -250,26 +242,15 @@ function buildUpPath(
     bwd.push(x);
     if (x === target) break;
   }
-  // bwd is meet … target already (parent climbs from meet toward target)
+  // bwd is meet … target (each step is a real forward edge)
   return fwd.concat(bwd.slice(1));
 }
 
-/**
- * Build the replayable log: first the stylised HIERARCHY beat (landmark nodes +
- * shortcut arcs, raised by level), then the bidirectional SEARCH beat (forward
- * and backward settles, two-coloured, climbing by level and meeting). Height for
- * every step is the LEVEL, so the model reads as a layered structure.
- */
 function buildLog(ch: CHData, F: SideResult, B: SideResult): ExplorationLog {
   const log: ExplorationLog = [];
   const lvl = (x: number) => ch.level[x];
 
-  // ---- Beat 1: hierarchy assembly ----
-  // One reveal step per landmark node (raised by its level) so the hierarchy
-  // materialises as a layered cloud of dots; the sampled shortcut arcs are spread
-  // across the first steps so they sweep in as the structure assembles. App reads
-  // step.node as a dot and the (from≠to) edge as an arc — both reveal on the same
-  // clock, and neither counts toward the search-work HUD because dir === 2.
+  // Beat 1: hierarchy assembly (landmark dots + sampled shortcut arcs).
   const hierSteps = ch.landmarks.length;
   for (let s = 0; s < hierSteps; s++) {
     const node = ch.landmarks[s];
@@ -281,11 +262,7 @@ function buildLog(ch: CHData, F: SideResult, B: SideResult): ExplorationLog {
     log.push(step);
   }
 
-  // ---- Beat 2: the bidirectional query, interleaved by settle distance ----
-  // We draw only the SEARCH TREE — one edge from each settled node back to the
-  // parent it was reached from — not every upward edge scanned. That keeps the
-  // two funnels clean and legible (a few hundred edges, not ~12k city-spanning
-  // lines) so the "meet in the middle" is actually visible.
+  // Beat 2: the two converging search trees (one edge per settled node).
   let i = 0;
   let jb = 0;
   while (i < F.order.length || jb < B.order.length) {

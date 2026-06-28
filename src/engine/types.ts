@@ -50,8 +50,10 @@ export interface CHGraphJSON {
     augEdgeCount: number;
     shortcutCount: number;
     maxSettled: number;
+    directed?: boolean;
   };
   level: number[];
+  /** Directed augmented edges [u, v, weightMeters, middle] (u→v). */
   edges: [number, number, number, number][];
 }
 

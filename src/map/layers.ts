@@ -185,9 +185,9 @@ export function buildLayers(input: LayerInput): Layer[] {
   // 3. THE SEARCH
   const r = input.render;
   if (r) {
-    // The search is drawn FLAT on the road plane — cost/level is shown by COLOUR,
-    // not height — so the visited nodes, the route, and the real roads all sit on
-    // the same plane and line up (no floating dome vs. grounded route mismatch).
+    // Drawn FLAT on the road plane — cost/level is shown by COLOUR, not height — so
+    // the visited nodes, the route, and the real roads all share one plane (this is
+    // the look that reads cleanly as a glowing flood spreading across the city).
     const zFactor = 0;
     const filterRange: [number, number] = [-1, r.revealStep];
     const op = r.opacity;

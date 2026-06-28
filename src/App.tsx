@@ -16,7 +16,8 @@ import Intro from "./ui/Intro";
 import RouteCard from "./ui/RouteCard";
 import { STAGES, isLocked } from "./stages";
 import { QUICK_ROUTES, type QuickRoute } from "./places";
-import { estimateRoute } from "./engine/eta";
+import { estimateRoute, conditionNow, type TrafficCondition } from "./engine/eta";
+import { fastestRoute } from "./engine/fastest";
 import {
   Graph,
   nearestNode,
@@ -59,7 +60,7 @@ export default function App() {
   const [sourceLabel, setSourceLabel] = useState("");
   const [destLabel, setDestLabel] = useState("");
 
-  const [speed, setSpeed] = useState(60);
+  const [speed, setSpeed] = useState(22);
   const [currentStage, setCurrentStage] = useState(0);
   const [phase, setPhase] = useState<Phase>("idle");
   const [results, setResults] = useState<Record<number, PathResult>>({});
@@ -74,6 +75,10 @@ export default function App() {
   const [pulse, setPulse] = useState(0);
   const [demoMode, setDemoMode] = useState(false);
   const [punchToken, setPunchToken] = useState(0); // bump to (re)reveal the punchline
+  const [condition, setCondition] = useState<TrafficCondition>(() => conditionNow());
+  const [routeMode, setRouteMode] = useState<"shortest" | "fastest">("shortest");
+  const [searching, setSearching] = useState(false);
+  const [searchErr, setSearchErr] = useState<string | null>(null);
 
   // Dissolve the intro title card after its animation finishes.
   useEffect(() => {
@@ -131,9 +136,11 @@ export default function App() {
   const roadEdges = useMemo<RoadEdge[]>(() => {
     if (!graph) return [];
     const out: RoadEdge[] = [];
+    // Draw each physical road once. Two-way edges exist both ways → draw when
+    // u < to. One-way edges have no reverse → draw regardless of node order.
     for (let u = 0; u < graph.nodeCount; u++) {
       for (const e of graph.adj[u]) {
-        if (u < e.to) {
+        if (u < e.to || e.oneway) {
           const [sx, sy] = graph.coords[u];
           const [tx, ty] = graph.coords[e.to];
           out.push({ sx, sy, tx, ty });
@@ -146,16 +153,30 @@ export default function App() {
   // --- Precompute the active stage's drawable geometry (once per stage) -------
   const isCH = currentStage === CH_STAGE;
   const presentation = currentStage === PRESENT_STAGE;
-  // Stage 4 keeps NO result of its own — it always derives the route from the
-  // live CH result (with an empty log so only the clean route draws). This makes
-  // it impossible for the Stage-4 view and "Show what really happened" to disagree.
+
+  // Stage 4: the FASTEST (time-optimal) route for the current condition, computed
+  // live. Distinct from the CH shortest-distance route — at peak it avoids clogged
+  // arterials and is genuinely a different line.
+  const fastestRes = useMemo(() => {
+    if (!graph || !presentation || sourceId == null || destId == null) return null;
+    return fastestRoute(graph, sourceId, destId, condition);
+  }, [graph, presentation, sourceId, destId, condition]);
+
+  // Stage 4 keeps NO result of its own — it derives the route from the CH result
+  // (shortest) or the live fastest result, by mode, so the Stage-4 view and "Show
+  // what really happened" can never disagree.
   const result = useMemo<PathResult | null>(() => {
     if (presentation) {
       const ch = results[CH_STAGE];
-      return ch ? { path: ch.path, log: [], stats: ch.stats, meetNode: ch.meetNode } : null;
+      if (!ch) return null;
+      const path =
+        routeMode === "fastest" && fastestRes && fastestRes.path.length > 1
+          ? fastestRes.path
+          : ch.path;
+      return { path, log: [], stats: ch.stats, meetNode: ch.meetNode };
     }
     return results[currentStage] ?? null;
-  }, [presentation, results, currentStage]);
+  }, [presentation, results, currentStage, routeMode, fastestRes]);
   const precomp = useMemo(() => {
     if (!result || !graph) return null;
     const edgeData: EdgeDatum[] = [];
@@ -203,18 +224,42 @@ export default function App() {
   const logLen = result?.log.length ?? 0;
   const pathLen = precomp?.pathPts.length ?? 0;
 
-  // Stage 4 ETA — free-flow travel-time estimate from the displayed CH route.
-  const routeEstimate = useMemo(() => {
-    if (!graph || !presentation || !result || result.path.length < 2) return null;
-    return estimateRoute(graph, result.path);
-  }, [graph, presentation, result]);
+  // Stage 4 ETAs under the selected condition: the shortest-distance (CH) route
+  // AND the fastest-time route, so the card shows both and the chosen one.
+  const shortEst = useMemo(() => {
+    const ch = results[CH_STAGE];
+    if (!graph || !presentation || !ch || ch.path.length < 2) return null;
+    return estimateRoute(graph, ch.path, condition);
+  }, [graph, presentation, results, condition]);
+  const fastEst = useMemo(() => {
+    if (!graph || !presentation || !fastestRes || fastestRes.path.length < 2) return null;
+    return estimateRoute(graph, fastestRes.path, condition);
+  }, [graph, presentation, fastestRes, condition]);
+  const routeEstimate = routeMode === "fastest" ? fastEst ?? shortEst : shortEst;
 
   // --- Animation loop --------------------------------------------------------
   useEffect(() => {
     if (!result || (phase !== "playing" && phase !== "in" && phase !== "out")) return;
     let raf = 0;
     const retractStep = Math.max(2000, Math.ceil(logLen / 30));
-    const growStep = phase === "in" ? Math.max(speed, Math.ceil(logLen / 42)) : speed;
+    // Dijkstra & co. use the flat deployed pacing: `speed` nodes/frame, so the
+    // wide flood unrolls slowly and dramatically. A* (stage 1) visits so few nodes
+    // that a flat rate empties its short log almost instantly — so instead we
+    // stretch A*'s reveal across a fixed, deliberate DURATION (~5s at default
+    // speed), making the guided beam crawl outward clearly.
+    // NOTE on phases: the FIRST stage (Dijkstra) reveals during "playing"; every
+    // later stage (A*, CH) advances out→in→done and reveals during "in". So a rate
+    // that only touches "playing" never affects A*. A* is handled FIRST below, for
+    // every phase, so its slow crawl always applies.
+    const isAstar = currentStage === 1;
+    const growStep = isAstar
+      ? // A* visits so few nodes that any speed-tied rate empties its log in a
+        // blink. Lock it to a fixed, deliberate crawl (~11s at 60fps), in BOTH the
+        // "in" and "playing" phases, that the speed slider can NOT override.
+        Math.max(1, Math.ceil(logLen / 650))
+      : phase === "in"
+        ? Math.max(speed, Math.ceil(logLen / 42))
+        : speed;
     // Stage 4 draws its single clean route on gently (product-grade); the
     // technical stages reveal their path faster behind the search.
     const pathInc = presentation ? 0.02 : phase === "in" ? 0.12 : 0.04 * (0.5 + speed / 120);
@@ -239,7 +284,7 @@ export default function App() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [phase, result, speed, logLen, pathLen, presentation]);
+  }, [phase, result, speed, logLen, pathLen, presentation, currentStage]);
 
   // Flowing pulse of light travelling along the finished route (loops).
   useEffect(() => {
@@ -408,6 +453,7 @@ export default function App() {
     setFramePath(null);
     setDemoMode(false);
     setPunchToken(0);
+    setRouteMode("shortest");
   }
 
   // Auto-play the whole sequence for a screen recording. Uses the endpoints YOU
@@ -427,7 +473,7 @@ export default function App() {
       setDestLabel(route.to.name);
     }
     setMode("source");
-    setSpeed(340);
+    setSpeed(110); // brisk but watchable for the recording
     setPunchToken(0);
     setDemoMode(true);
     play(0, s, d, {});
@@ -449,6 +495,45 @@ export default function App() {
         dest: graph.coords[destId],
         token: Date.now(),
       });
+    }
+  }
+
+  // Free-text place search → OSM Nominatim geocode (bounded to Bengaluru) → snap
+  // to the nearest graph node → set the current endpoint (source/destination).
+  async function handleSearch(query: string) {
+    if (!graph || !query.trim()) return;
+    setSearching(true);
+    setSearchErr(null);
+    try {
+      const viewbox = "77.45,13.10,77.78,12.82"; // west,north,east,south
+      const url =
+        "https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&bounded=1" +
+        `&viewbox=${viewbox}&q=${encodeURIComponent(query + ", Bengaluru, India")}`;
+      const res = await fetch(url, { headers: { Accept: "application/json" } });
+      const data = (await res.json()) as Array<{ lat: string; lon: string; display_name?: string }>;
+      if (!Array.isArray(data) || data.length === 0) {
+        setSearchErr("No place found in Bengaluru");
+        return;
+      }
+      const lng = parseFloat(data[0].lon);
+      const lat = parseFloat(data[0].lat);
+      const id = nearestNode(graph, lng, lat);
+      const label = (data[0].display_name ?? query).split(",")[0];
+      setDemoMode(false);
+      resetBuild();
+      setFocus({ coord: graph.coords[id] as [number, number], token: Date.now() });
+      if (mode === "source") {
+        setSourceId(id);
+        setSourceLabel(label);
+        setMode("destination");
+      } else {
+        setDestId(id);
+        setDestLabel(label);
+      }
+    } catch {
+      setSearchErr("Search failed — check your connection");
+    } finally {
+      setSearching(false);
     }
   }
 
@@ -597,6 +682,9 @@ export default function App() {
       <ControlPanel
         mode={mode}
         onModeChange={setMode}
+        onSearch={handleSearch}
+        searching={searching}
+        searchErr={searchErr}
         sourceLabel={sourceLabel || "Not set"}
         destLabel={destLabel || "Not set"}
         speed={speed}
@@ -643,8 +731,15 @@ export default function App() {
             fromLabel={sourceLabel}
             toLabel={destLabel}
             minutes={routeEstimate.minutes}
+            freeMinutes={routeEstimate.freeMinutes}
             distanceKm={routeEstimate.distanceKm}
             via={routeEstimate.via}
+            condition={condition}
+            onCondition={setCondition}
+            routeMode={routeMode}
+            onRouteMode={setRouteMode}
+            shortMinutes={shortEst ? shortEst.minutes : null}
+            fastMinutes={fastEst ? fastEst.minutes : null}
             onShowReal={handleShowReal}
           />
           <div key={punchToken} className="punchline">

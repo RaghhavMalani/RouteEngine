@@ -1,25 +1,17 @@
 /**
- * build-ch.ts — Contraction Hierarchies preprocessing (run once, offline).
+ * build-ch.ts — DIRECTED Contraction Hierarchies preprocessing (run once, offline).
  *
- * Run with `npm run build-ch` AFTER `npm run build-graph`. It reads the routing
- * graph, contracts every node in increasing order of importance, adds shortcut
- * edges that preserve shortest distances, and writes an augmented graph + per-node
- * levels to `public/bengaluru-ch.json` for the Stage 3 query to load at runtime.
+ * Run with `npm run build-ch` AFTER `npm run build-graph`. It honours one-way
+ * streets: a one-way edge is used only in its legal direction, so the resulting
+ * hierarchy (and every query on it) is *drivable*, not just geometrically shortest.
  *
- * WHY OFFLINE: contraction is expensive; queries must be instant. We pay the cost
- * once and ship the result, exactly like the OSM→graph build.
- *
- * NODE ORDERING: a lazy priority queue keyed by EDGE DIFFERENCE (shortcuts a
- * contraction would add minus the edges it removes) plus a contracted-neighbours
- * term to spread the order out. We pop the cheapest node, recompute its priority,
- * and only contract it if it's still the minimum — otherwise we push it back.
- *
- * WITNESS SEARCH: before adding a shortcut u→w through v we run a local Dijkstra
- * from u (ignoring v) to see if a path u→w no longer than w(u,v)+w(v,w) already
- * exists. If so, no shortcut is needed. The search is BOUNDED (capped settled
- * count + a distance bound) so it stays tractable on ~220k nodes — a limited
- * witness search may add a few unnecessary shortcuts, which is standard CH
- * engineering and stays correct, just slightly larger.
+ * Node ordering = lazy priority queue keyed by EDGE DIFFERENCE (directed shortcuts
+ * added minus in+out edges removed) + a contracted-neighbours term. Contracting v
+ * considers each (in-neighbour u → v → out-neighbour w) pair; a bounded directed
+ * WITNESS search (local Dijkstra from u over out-edges, ignoring v) decides whether
+ * a shortcut u→w is needed. Shortcuts store the middle node for unpacking. The
+ * bounded witness can add a few extra shortcuts — standard CH engineering, still
+ * optimal. Output: public/bengaluru-ch.json (directed augmented edges + levels).
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -30,8 +22,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
 const INPUT = resolve(ROOT, "public", "bengaluru-graph.json");
 const OUTPUT = resolve(ROOT, "public", "bengaluru-ch.json");
-
-/** Cap on witness-search settled nodes (bounds preprocessing cost). */
 const MAX_SETTLED = 120;
 
 interface GraphJSON {
@@ -44,168 +34,131 @@ const tStart = Date.now();
 const data = JSON.parse(readFileSync(INPUT, "utf8")) as GraphJSON;
 const N = data.nodes.length;
 
-// Dynamic adjacency: per-node parallel arrays. mid = -1 for an original edge.
-const aTo: number[][] = Array.from({ length: N }, () => []);
-const aW: number[][] = Array.from({ length: N }, () => []);
-const aMid: number[][] = Array.from({ length: N }, () => []);
+// Directed dynamic adjacency: out + in. mid = -1 for an original edge.
+const oTo: number[][] = Array.from({ length: N }, () => []);
+const oW: number[][] = Array.from({ length: N }, () => []);
+const oMid: number[][] = Array.from({ length: N }, () => []);
+const iFr: number[][] = Array.from({ length: N }, () => []);
+const iW: number[][] = Array.from({ length: N }, () => []);
+const iMid: number[][] = Array.from({ length: N }, () => []);
 
-function addEdge(u: number, v: number, w: number, mid: number): void {
-  const tu = aTo[u];
-  for (let i = 0; i < tu.length; i++) {
-    if (tu[i] === v) {
-      if (w < aW[u][i]) { aW[u][i] = w; aMid[u][i] = mid; }
-      return;
-    }
-  }
-  aTo[u].push(v); aW[u].push(w); aMid[u].push(mid);
+function addArc(u: number, v: number, w: number, mid: number): void {
+  const ot = oTo[u];
+  let found = false;
+  for (let k = 0; k < ot.length; k++)
+    if (ot[k] === v) { if (w < oW[u][k]) { oW[u][k] = w; oMid[u][k] = mid; } found = true; break; }
+  if (!found) { oTo[u].push(v); oW[u].push(w); oMid[u].push(mid); }
+  const it = iFr[v];
+  found = false;
+  for (let k = 0; k < it.length; k++)
+    if (it[k] === u) { if (w < iW[v][k]) { iW[v][k] = w; iMid[v][k] = mid; } found = true; break; }
+  if (!found) { iFr[v].push(u); iW[v].push(w); iMid[v].push(mid); }
 }
 
-for (const [u, v, len] of data.edges) {
-  addEdge(u, v, len, -1);
-  addEdge(v, u, len, -1);
+let oneCount = 0;
+for (const [u, v, len, , oneway] of data.edges) {
+  addArc(u, v, len, -1);
+  if (oneway === 1) oneCount++;
+  else addArc(v, u, len, -1);
 }
-console.log(`• loaded ${N.toLocaleString()} nodes, ${data.edges.length.toLocaleString()} edges`);
+console.log(`• loaded ${N.toLocaleString()} nodes, ${data.edges.length.toLocaleString()} edges (${oneCount.toLocaleString()} one-way)`);
 
 const level = new Int32Array(N).fill(-1);
 const contracted = new Uint8Array(N);
 const contractedNb = new Int32Array(N);
 
-// version-stamped distance array for fast repeated bounded Dijkstra
 const dist = new Float64Array(N);
 const stamp = new Int32Array(N);
 let curStamp = 0;
-
-// typed binary heap for the witness search
 let hd = new Float64Array(1024);
 let hv = new Int32Array(1024);
 let hn = 0;
-function heapClear(): void { hn = 0; }
-function heapPush(d: number, v: number): void {
-  if (hn === hd.length) {
-    const nd = new Float64Array(hd.length * 2); const nv = new Int32Array(hd.length * 2);
-    nd.set(hd); nv.set(hv); hd = nd; hv = nv;
-  }
+function hClear(): void { hn = 0; }
+function hPush(d: number, v: number): void {
+  if (hn === hd.length) { const a = new Float64Array(hd.length * 2); const b = new Int32Array(hd.length * 2); a.set(hd); b.set(hv); hd = a; hv = b; }
   let i = hn++; hd[i] = d; hv[i] = v;
-  while (i > 0) { const p = (i - 1) >> 1; if (hd[p] <= hd[i]) break;
-    const td = hd[p]; hd[p] = hd[i]; hd[i] = td; const tv = hv[p]; hv[p] = hv[i]; hv[i] = tv; i = p; }
+  while (i > 0) { const p = (i - 1) >> 1; if (hd[p] <= hd[i]) break; const td = hd[p]; hd[p] = hd[i]; hd[i] = td; const tv = hv[p]; hv[p] = hv[i]; hv[i] = tv; i = p; }
 }
-function heapPopNode(): number {
+function hPop(): number {
   const rv = hv[0]; hn--;
-  if (hn > 0) { hd[0] = hd[hn]; hv[0] = hv[hn]; let i = 0;
-    for (;;) { const l = 2 * i + 1, r = l + 1; let s = i;
-      if (l < hn && hd[l] < hd[s]) s = l; if (r < hn && hd[r] < hd[s]) s = r;
-      if (s === i) break; const td = hd[s]; hd[s] = hd[i]; hd[i] = td; const tv = hv[s]; hv[s] = hv[i]; hv[i] = tv; i = s; } }
+  if (hn > 0) { hd[0] = hd[hn]; hv[0] = hv[hn]; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let s = i; if (l < hn && hd[l] < hd[s]) s = l; if (r < hn && hd[r] < hd[s]) s = r; if (s === i) break; const td = hd[s]; hd[s] = hd[i]; hd[i] = td; const tv = hv[s]; hv[s] = hv[i]; hv[i] = tv; i = s; } }
   return rv;
 }
 
-function activeNeighbours(v: number): { nb: number[]; wt: number[] } {
-  const nb: number[] = []; const wt: number[] = [];
-  const seen = new Map<number, number>();
-  const tv = aTo[v];
-  for (let i = 0; i < tv.length; i++) {
-    const x = tv[i]; if (contracted[x]) continue;
-    const w = aW[v][i];
-    const e = seen.get(x);
-    if (e === undefined) { seen.set(x, nb.length); nb.push(x); wt.push(w); }
-    else if (w < wt[e]) wt[e] = w;
-  }
+function activeOut(v: number): { nb: number[]; wt: number[] } {
+  const nb: number[] = []; const wt: number[] = []; const seen = new Map<number, number>(); const t = oTo[v];
+  for (let i = 0; i < t.length; i++) { const x = t[i]; if (contracted[x]) continue; const w = oW[v][i]; const e = seen.get(x); if (e === undefined) { seen.set(x, nb.length); nb.push(x); wt.push(w); } else if (w < wt[e]) wt[e] = w; }
+  return { nb, wt };
+}
+function activeIn(v: number): { nb: number[]; wt: number[] } {
+  const nb: number[] = []; const wt: number[] = []; const seen = new Map<number, number>(); const t = iFr[v];
+  for (let i = 0; i < t.length; i++) { const x = t[i]; if (contracted[x]) continue; const w = iW[v][i]; const e = seen.get(x); if (e === undefined) { seen.set(x, nb.length); nb.push(x); wt.push(w); } else if (w < wt[e]) wt[e] = w; }
   return { nb, wt };
 }
 
-/** Bounded local Dijkstra from u, ignoring `avoid`; results read via getDist. */
 function witness(u: number, avoid: number, maxDist: number): void {
-  curStamp++; heapClear();
-  dist[u] = 0; stamp[u] = curStamp; heapPush(0, u);
+  curStamp++; hClear(); dist[u] = 0; stamp[u] = curStamp; hPush(0, u);
   let settled = 0;
   while (hn > 0) {
-    const du = hd[0]; const u2 = heapPopNode();
-    if (du > dist[u2]) continue;
+    const du = hd[0]; const x = hPop();
+    if (du > dist[x]) continue;
     if (du > maxDist) break;
     if (++settled > MAX_SETTLED) break;
-    const t = aTo[u2]; const w = aW[u2];
-    for (let i = 0; i < t.length; i++) {
-      const x = t[i]; if (contracted[x] || x === avoid) continue;
-      const nd = du + w[i]; if (nd > maxDist) continue;
-      if (stamp[x] !== curStamp || nd < dist[x]) { dist[x] = nd; stamp[x] = curStamp; heapPush(nd, x); }
-    }
+    const t = oTo[x]; const w = oW[x];
+    for (let i = 0; i < t.length; i++) { const y = t[i]; if (contracted[y] || y === avoid) continue; const nd = du + w[i]; if (nd > maxDist) continue; if (stamp[y] !== curStamp || nd < dist[y]) { dist[y] = nd; stamp[y] = curStamp; hPush(nd, y); } }
   }
 }
-const getDist = (x: number): number => (stamp[x] === curStamp ? dist[x] : Infinity);
+const gd = (x: number): number => (stamp[x] === curStamp ? dist[x] : Infinity);
 
-/** Contract v (add=false → just count edge difference). */
 function contract(v: number, add: boolean): { added: number; deg: number } {
-  const { nb, wt } = activeNeighbours(v);
-  const deg = nb.length;
+  const inN = activeIn(v); const outN = activeOut(v);
   let added = 0;
-  for (let i = 0; i < deg; i++) {
-    const u = nb[i]; const wuv = wt[i];
+  for (let a = 0; a < inN.nb.length; a++) {
+    const u = inN.nb[a]; const wuv = inN.wt[a];
     let maxP = 0;
-    for (let k = 0; k < deg; k++) if (k !== i) { const p = wuv + wt[k]; if (p > maxP) maxP = p; }
+    for (let b = 0; b < outN.nb.length; b++) if (outN.nb[b] !== u) { const p = wuv + outN.wt[b]; if (p > maxP) maxP = p; }
     if (maxP === 0) continue;
     witness(u, v, maxP);
-    for (let k = 0; k < deg; k++) {
-      if (k === i) continue;
-      const w = nb[k]; const P = wuv + wt[k];
-      if (getDist(w) <= P + 1e-9) continue;
+    for (let b = 0; b < outN.nb.length; b++) {
+      const w = outN.nb[b]; if (w === u) continue;
+      const P = wuv + outN.wt[b];
+      if (gd(w) <= P + 1e-9) continue;
       added++;
-      if (add) addEdge(u, w, P, v);
+      if (add) addArc(u, w, P, v);
     }
   }
-  return { added, deg };
+  return { added, deg: inN.nb.length + outN.nb.length };
 }
 
-// lazy priority queue of (priority, node)
 let pd = new Float64Array(N);
 let pv = new Int32Array(N);
 let pn = 0;
-function pqPush(p: number, v: number): void {
-  let i = pn++; pd[i] = p; pv[i] = v;
-  while (i > 0) { const par = (i - 1) >> 1; if (pd[par] <= pd[i]) break;
-    const t = pd[par]; pd[par] = pd[i]; pd[i] = t; const tv = pv[par]; pv[par] = pv[i]; pv[i] = tv; i = par; }
-}
-function pqPopNode(): number {
-  const rv = pv[0]; pn--;
-  if (pn > 0) { pd[0] = pd[pn]; pv[0] = pv[pn]; let i = 0;
-    for (;;) { const l = 2 * i + 1, r = l + 1; let s = i;
-      if (l < pn && pd[l] < pd[s]) s = l; if (r < pn && pd[r] < pd[s]) s = r;
-      if (s === i) break; const t = pd[s]; pd[s] = pd[i]; pd[i] = t; const tv = pv[s]; pv[s] = pv[i]; pv[i] = tv; i = s; } }
-  return rv;
-}
+function pqPush(p: number, v: number): void { let i = pn++; pd[i] = p; pv[i] = v; while (i > 0) { const par = (i - 1) >> 1; if (pd[par] <= pd[i]) break; const t = pd[par]; pd[par] = pd[i]; pd[i] = t; const tv = pv[par]; pv[par] = pv[i]; pv[i] = tv; i = par; } }
+function pqPop(): number { const rv = pv[0]; pn--; if (pn > 0) { pd[0] = pd[pn]; pv[0] = pv[pn]; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let s = i; if (l < pn && pd[l] < pd[s]) s = l; if (r < pn && pd[r] < pd[s]) s = r; if (s === i) break; const t = pd[s]; pd[s] = pd[i]; pd[i] = t; const tv = pv[s]; pv[s] = pv[i]; pv[i] = tv; i = s; } } return rv; }
 const pqTop = (): number => (pn > 0 ? pd[0] : Infinity);
 
-// initial node ordering
-for (let v = 0; v < N; v++) {
-  const { added, deg } = contract(v, false);
-  pqPush(added - deg + contractedNb[v], v);
-}
+for (let v = 0; v < N; v++) { const r = contract(v, false); pqPush(r.added - r.deg + contractedNb[v], v); }
 console.log(`• initial ordering in ${Date.now() - tStart}ms`);
 
-// main contraction loop
 let order = 0;
 while (pn > 0) {
-  const v = pqPopNode();
+  const v = pqPop();
   if (contracted[v]) continue;
   const sim = contract(v, false);
   const pri = sim.added - sim.deg + contractedNb[v];
-  if (pn > 0 && pri > pqTop() + 1e-9) { pqPush(pri, v); continue; } // lazy: no longer min
+  if (pn > 0 && pri > pqTop() + 1e-9) { pqPush(pri, v); continue; }
   contract(v, true);
   contracted[v] = 1; level[v] = order++;
-  const { nb } = activeNeighbours(v);
-  for (const x of nb) contractedNb[x]++;
+  const oN = activeOut(v); const iN = activeIn(v);
+  for (const x of oN.nb) contractedNb[x]++;
+  for (const x of iN.nb) contractedNb[x]++;
 }
 
-// collect augmented edges (u < v), counting shortcuts
 const edges: [number, number, number, number][] = [];
 let shortcutCount = 0;
 for (let u = 0; u < N; u++) {
-  const t = aTo[u];
-  for (let i = 0; i < t.length; i++) {
-    const v = t[i];
-    if (u < v) {
-      edges.push([u, v, aW[u][i], aMid[u][i]]);
-      if (aMid[u][i] !== -1) shortcutCount++;
-    }
-  }
+  const t = oTo[u];
+  for (let i = 0; i < t.length; i++) { edges.push([u, t[i], oW[u][i], oMid[u][i]]); if (oMid[u][i] !== -1) shortcutCount++; }
 }
 
 const out = {
@@ -216,13 +169,14 @@ const out = {
     augEdgeCount: edges.length,
     shortcutCount,
     maxSettled: MAX_SETTLED,
+    directed: true,
   },
   level: Array.from(level),
   edges,
 };
 writeFileSync(OUTPUT, JSON.stringify(out));
 
-console.log(`\n✔ CH built → public/bengaluru-ch.json`);
-console.log(`  preprocessing time: ${((Date.now() - tStart) / 1000).toFixed(1)}s`);
-console.log(`  shortcuts added:    ${shortcutCount.toLocaleString()}`);
-console.log(`  total edges:        ${edges.length.toLocaleString()} (was ${data.edges.length.toLocaleString()})`);
+console.log(`\n✔ Directed CH built → public/bengaluru-ch.json`);
+console.log(`  preprocessing time:  ${((Date.now() - tStart) / 1000).toFixed(1)}s`);
+console.log(`  directed shortcuts:  ${shortcutCount.toLocaleString()}`);
+console.log(`  total directed edges:${edges.length.toLocaleString()} (was ${data.edges.length.toLocaleString()})`);
