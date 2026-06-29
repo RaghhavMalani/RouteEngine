@@ -73,6 +73,16 @@ function isArterial(base: string): boolean {
   );
 }
 
+/** Free-flow speed (km/h) for an OSM highway class. Shared with the traffic model. */
+export function freeFlowKmh(highway: string): number {
+  return FREE_FLOW_KMH[highway] ?? DEFAULT_KMH;
+}
+
+/** Whether a highway class is a major artery (clogs hardest at peak). */
+export function isArterialClass(highway: string): boolean {
+  return isArterial(highway.replace(/_link$/, ""));
+}
+
 /**
  * Effective speed (km/h) of one road segment under a condition — free-flow speed
  * for its class × the congestion factor. This is the weight basis for *time*-

@@ -404,12 +404,61 @@ payload with a known topology.
 
 ---
 
+## Phase 5 — Traffic-aware routing & live rerouting
+
+The **Traffic** mode (toggle at the top of the panel) shifts the objective from
+distance to **travel time**. Every edge's weight becomes
+
+```
+time(seconds) = length / (freeFlowSpeed(roadClass) × congestionFactor)
+```
+
+where `congestionFactor` retains 100 % of free-flow at **FREE**, 60 % at **MODERATE**,
+35 % at **HEAVY**, and 0 % at **BLOCKED** (a closure — effectively infinite time).
+
+**Simulated traffic (honest).** Congestion is *modelled*, not a live feed. It is driven
+by **time of day** — arterials and highways clog toward the 9 am and 6 pm peaks and run
+free overnight — with a mild "closer to the centre is worse" bias, so it has a plausible
+shape rather than being random noise. The time-of-day slider re-colours the network
+(green / amber / red on arterials) and re-weights the graph. Because the longer road can
+be faster once the short one is jammed, the panel shows both candidate routes with their
+distance **and** time and highlights the time-winner (the "shorter-but-slower vs
+longer-but-faster" teaching moment; one-click via *Show me a rush-hour detour*).
+
+**Live rerouting.** A vehicle drives the current route. *Inject incident* closes a road
+just ahead of it and the engine **recomputes from the vehicle's current node to the
+destination** on the updated time-weights (a directed A\*), and the car switches onto the
+new route. The recompute time is reported in the panel (low-tens of ms at this scale —
+fast enough to do on every change, which is exactly why we reroute on Dijkstra/A\* here
+and **not** on CH).
+
+### Honest scope note — why not CH for rerouting?
+
+Contraction Hierarchies precomputes shortcuts **against a fixed metric**. The moment edge
+weights change (traffic, a closure), those shortcuts are stale, so a CH query on the new
+weights can be wrong. Rebuilding the whole hierarchy per change is far too slow. The
+production answer is **Customizable Route Planning (CRP)** / **Customizable Contraction
+Hierarchies (CCH)**: split preprocessing into a slow **metric-independent** phase (over
+the topology alone) and a fast **customization** phase that re-weights the precomputed
+structure whenever the metric changes, keeping queries fast.
+
+This phase deliberately stops short of CRP/CCH (it reroutes on plain directed A\*), but the
+code leaves a clean seam for it: `engine/traffic.ts` separates the **graph (topology,
+metric-independent)** from a **`TrafficModel` (the metric)**. Today a reroute builds a
+fresh `TrafficModel` and re-runs A\*; a future customization phase would slot in at exactly
+that boundary — re-weighting a precomputed structure — **without** touching the engine or
+the topology.
+
+---
+
 ## Roadmap
 
-All four models are built (see the Stage 2 → 3 and Stage 3 → 4 sections above). Next:
+All four models plus traffic-aware routing and live rerouting are built. Next:
 
-- **Live traffic + time-optimal routing:** replace the free-flow per-class speeds with
-  live/historical per-edge speeds — the ETA becomes traffic-aware and the route becomes
-  time-optimal (the Stage 4 speed table is the seam this plugs into).
-- Directed graph honouring one-ways and turn restrictions.
-- Dynamic rerouting as conditions change.
+- **Customizable Route Planning (CRP / CCH):** a metric-independent preprocessing phase +
+  a fast customization pass, so traffic-aware queries stay CH-fast (the `TrafficModel`
+  seam above is where this plugs in).
+- Turn restrictions (edge-based / turn-expanded graph) on top of the existing one-way
+  directed graph.
+- A real traffic provider replacing the simulated time-of-day model (same `TrafficModel`
+  interface).

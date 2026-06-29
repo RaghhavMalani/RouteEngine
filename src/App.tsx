@@ -16,8 +16,17 @@ import Intro from "./ui/Intro";
 import RouteCard from "./ui/RouteCard";
 import { STAGES, isLocked } from "./stages";
 import { QUICK_ROUTES, type QuickRoute } from "./places";
-import { estimateRoute, conditionNow, type TrafficCondition } from "./engine/eta";
+import { estimateRoute, conditionNow, isArterialClass, type TrafficCondition } from "./engine/eta";
 import { fastestRoute } from "./engine/fastest";
+import {
+  TrafficModel,
+  trafficRoute,
+  congestionAt,
+  edgeKey,
+} from "./engine/traffic";
+import { haversine } from "./engine/geo";
+import TrafficPanel from "./ui/TrafficPanel";
+import ModeSwitch from "./ui/ModeSwitch";
 import {
   Graph,
   nearestNode,
@@ -42,6 +51,39 @@ interface FrameRoute {
   source: [number, number];
   dest: [number, number];
   token: number;
+}
+
+/** One arterial segment for the Phase-5 congestion overlay (with routing keys). */
+interface Arterial {
+  sx: number;
+  sy: number;
+  tx: number;
+  ty: number;
+  mx: number;
+  my: number;
+  u: number;
+  v: number;
+  hw: string;
+}
+
+/** The route the vehicle is currently driving, with cumulative distances. */
+interface Journey {
+  path: number[];
+  coords: [number, number][];
+  cum: number[]; // cum[i] = metres from start to vertex i
+  total: number;
+}
+
+/** Interpolate the vehicle's position (and which segment it's on) at `m` metres. */
+function posAt(j: Journey, m: number): { coord: [number, number]; segIndex: number } {
+  const mm = Math.min(Math.max(0, m), j.total);
+  let i = 0;
+  while (i < j.cum.length - 2 && j.cum[i + 1] < mm) i++;
+  const segLen = j.cum[i + 1] - j.cum[i] || 1;
+  const t = (mm - j.cum[i]) / segLen;
+  const a = j.coords[i];
+  const b = j.coords[i + 1];
+  return { coord: [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t], segIndex: i };
 }
 
 const fmtCoord = (c: LngLat) => `${c[1].toFixed(4)}, ${c[0].toFixed(4)}`;
@@ -80,11 +122,31 @@ export default function App() {
   const [searching, setSearching] = useState(false);
   const [searchErr, setSearchErr] = useState<string | null>(null);
 
+  // --- Phase 5: Traffic mode (separate from the staged sequence) --------------
+  const [appMode, setAppMode] = useState<"sequence" | "traffic">("sequence");
+  const [hour, setHour] = useState(9); // time-of-day 0..23
+  const [trafficMetric, setTrafficMetric] = useState<"time" | "distance">("time");
+  const [closures, setClosures] = useState<string[]>([]); // blocked edge keys
+  const trafficMode = appMode === "traffic";
+
+  // Slice B — the driving vehicle + live rerouting.
+  const [journey, setJourney] = useState<Journey | null>(null);
+  const [progressM, setProgressM] = useState(0);
+  const [driving, setDriving] = useState(false);
+  const [rerouteMs, setRerouteMs] = useState<number | null>(null);
+  const [oldRouteCoords, setOldRouteCoords] = useState<[number, number][] | null>(null);
+
   // Dissolve the intro title card after its animation finishes.
   useEffect(() => {
     const t = window.setTimeout(() => setShowIntro(false), 3000);
     return () => window.clearTimeout(t);
   }, []);
+
+  // Tag <body> with the active mode so mobile CSS can lay out Traffic differently.
+  useEffect(() => {
+    document.body.classList.toggle("traffic-mode", appMode === "traffic");
+    return () => document.body.classList.remove("traffic-mode");
+  }, [appMode]);
 
   const chReady = chPathfinder !== null;
 
@@ -149,6 +211,146 @@ export default function App() {
     }
     return out;
   }, [graph]);
+
+  // --- Phase 5: arterial overlay geometry (built once) -----------------------
+  const arterials = useMemo<Arterial[]>(() => {
+    if (!graph) return [];
+    const out: Arterial[] = [];
+    for (let u = 0; u < graph.nodeCount; u++) {
+      for (const e of graph.adj[u]) {
+        if (!isArterialClass(e.highway)) continue;
+        if (!(u < e.to || e.oneway)) continue; // draw each physical road once
+        const [sx, sy] = graph.coords[u];
+        const [tx, ty] = graph.coords[e.to];
+        out.push({ sx, sy, tx, ty, mx: (sx + tx) / 2, my: (sy + ty) / 2, u, v: e.to, hw: e.highway });
+      }
+    }
+    return out;
+  }, [graph]);
+
+  const closureSet = useMemo(() => new Set(closures), [closures]);
+
+  // Per-arterial congestion level for the current hour (recomputed on slider move).
+  const congestionLevels = useMemo(() => {
+    const lv = new Uint8Array(arterials.length);
+    for (let i = 0; i < arterials.length; i++) {
+      const a = arterials[i];
+      lv[i] =
+        closureSet.has(edgeKey(a.u, a.v)) || closureSet.has(edgeKey(a.v, a.u))
+          ? 3
+          : congestionAt(a.hw, hour, a.mx, a.my);
+    }
+    return lv;
+  }, [arterials, hour, closureSet]);
+
+  // Live traffic model + both candidate routes (time-optimal vs distance-optimal).
+  const trafficModelObj = useMemo(() => new TrafficModel(hour, closures), [hour, closures]);
+  const trafficRoutes = useMemo(() => {
+    if (!graph || !trafficMode || sourceId == null || destId == null) return null;
+    const byTime = trafficRoute(graph, sourceId, destId, trafficModelObj, true);
+    const byDist = trafficRoute(graph, sourceId, destId, trafficModelObj, false);
+    return { byTime, byDist };
+  }, [graph, trafficMode, sourceId, destId, trafficModelObj]);
+
+  // Build a drivable Journey (with cumulative distances) from a node path.
+  const buildJourney = (path: number[]): Journey | null => {
+    if (!graph || path.length < 2) return null;
+    const coords = path.map((id) => graph.coords[id] as [number, number]);
+    const cum = [0];
+    for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + haversine(coords[i - 1], coords[i]));
+    return { path, coords, cum, total: cum[cum.length - 1] };
+  };
+
+  // The vehicle's live position along its current journey.
+  const vehicle = useMemo(
+    () => (journey ? posAt(journey, progressM) : null),
+    [journey, progressM],
+  );
+
+  // Drive loop: advance the vehicle along the journey while "driving".
+  useEffect(() => {
+    if (!driving || !journey) return;
+    let raf = 0;
+    let last = performance.now();
+    const SIM_MPS = 360; // simulated metres/second (a brisk fast-forward)
+    const tick = (now: number) => {
+      const dt = (now - last) / 1000;
+      last = now;
+      setProgressM((p) => {
+        const np = p + SIM_MPS * dt;
+        if (np >= journey.total) {
+          setDriving(false);
+          return journey.total;
+        }
+        return np;
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [driving, journey]);
+
+  // Leaving Traffic mode or changing endpoints resets the drive.
+  useEffect(() => {
+    setJourney(null);
+    setProgressM(0);
+    setDriving(false);
+    setClosures([]);
+    setOldRouteCoords(null);
+    setRerouteMs(null);
+  }, [sourceId, destId, appMode]);
+
+  function handleStartDrive() {
+    if (!trafficRoutes) return;
+    const r = trafficMetric === "time" ? trafficRoutes.byTime : trafficRoutes.byDist;
+    const j = buildJourney(r.path);
+    if (!j) return;
+    setJourney(j);
+    setProgressM(0);
+    setOldRouteCoords(null);
+    setRerouteMs(null);
+    setDriving(true);
+  }
+
+  function handleToggleDrive() {
+    if (!journey) handleStartDrive();
+    else setDriving((d) => !d);
+  }
+
+  /** Close a road just ahead of the vehicle and reroute from its current position. */
+  function handleInject() {
+    if (!graph || !journey || destId == null) return;
+    const { segIndex } = posAt(journey, progressM);
+    const fromIdx = Math.min(journey.path.length - 1, segIndex + 1); // next vertex ahead
+    const closeIdx = segIndex + 3; // an edge further down the road
+    if (closeIdx >= journey.path.length - 1 || fromIdx >= journey.path.length - 1) return;
+    const a = journey.path[closeIdx];
+    const b = journey.path[closeIdx + 1];
+    const fromNode = journey.path[fromIdx];
+    const nextClosures = [...closures, edgeKey(a, b)];
+    setClosures(nextClosures);
+
+    const model = new TrafficModel(hour, nextClosures);
+    const t0 = performance.now();
+    const re = trafficRoute(graph, fromNode, destId, model, trafficMetric === "time");
+    setRerouteMs(performance.now() - t0);
+    if (re.path.length < 2) return;
+
+    // Keep the already-driven prefix (through fromNode), then splice on the new route.
+    const prefix = journey.path.slice(0, fromIdx + 1);
+    const newPath = [...prefix, ...re.path.slice(1)];
+    setOldRouteCoords(journey.coords);
+    const nj = buildJourney(newPath);
+    if (nj) setJourney(nj); // progressM stays valid — prefix distances are unchanged
+    setDriving(true);
+    window.setTimeout(() => setOldRouteCoords(null), 3200);
+  }
+
+  function handleClearIncidents() {
+    setClosures([]);
+    setOldRouteCoords(null);
+    setRerouteMs(null);
+  }
 
   // --- Precompute the active stage's drawable geometry (once per stage) -------
   const isCH = currentStage === CH_STAGE;
@@ -251,12 +453,13 @@ export default function App() {
     // later stage (A*, CH) advances out→in→done and reveals during "in". So a rate
     // that only touches "playing" never affects A*. A* is handled FIRST below, for
     // every phase, so its slow crawl always applies.
-    const isAstar = currentStage === 1;
-    const growStep = isAstar
-      ? // A* visits so few nodes that any speed-tied rate empties its log in a
-        // blink. Lock it to a fixed, deliberate crawl (~11s at 60fps), in BOTH the
-        // "in" and "playing" phases, that the speed slider can NOT override.
-        Math.max(1, Math.ceil(logLen / 650))
+    // A* (stage 1) AND CH (stage 2) both advance via the "in" phase and visit far
+    // fewer nodes than Dijkstra's flood, so any speed-tied rate empties their logs
+    // in a blink. Lock BOTH to a fixed, deliberate crawl (~11s at 60fps), in every
+    // phase, that the speed slider can NOT override. Dijkstra keeps its flat flood.
+    const slowCrawl = currentStage === 1 || currentStage === CH_STAGE;
+    const growStep = slowCrawl
+      ? Math.max(1, Math.ceil(logLen / 540))
       : phase === "in"
         ? Math.max(speed, Math.ceil(logLen / 42))
         : speed;
@@ -441,6 +644,20 @@ export default function App() {
     play(0, s, d, {});
   }
 
+  /** Slice C: one-click "shorter-but-slower" teaching scenario at the morning peak. */
+  function handleScenario() {
+    if (!graph) return;
+    const route = QUICK_ROUTES[1]; // Koramangala → Manyata Tech Park (strong peak contrast)
+    const s = nearestNode(graph, route.from.coord[0], route.from.coord[1]);
+    const d = nearestNode(graph, route.to.coord[0], route.to.coord[1]);
+    setSourceId(s);
+    setDestId(d);
+    setSourceLabel(route.from.name);
+    setDestLabel(route.to.name);
+    setHour(9); // morning peak — arterials clog, the longer route wins on time
+    setTrafficMetric("time");
+  }
+
   function handleReset() {
     resetBuild();
     setSourceId(null);
@@ -563,20 +780,84 @@ export default function App() {
           }
         : null;
 
+    // Phase 5: in Traffic mode the staged search is suppressed and replaced by the
+    // congestion overlay + the active/alternative route.
+    const toCoords = (path: number[]): [number, number][] =>
+      path.map((id) => graph.coords[id] as [number, number]);
+    let traffic = null as Parameters<typeof buildLayers>[0]["traffic"];
+    if (trafficMode) {
+      // Closure markers from the blocked-edge keys (covers any road class).
+      // Defensive: never let a malformed key crash the whole render.
+      const closureMids: [number, number][] = [];
+      for (const kk of closures) {
+        const sp = kk.split(" ");
+        const a = graph.coords[Number(sp[0])];
+        const b = graph.coords[Number(sp[1])];
+        if (!a || !b) continue;
+        closureMids.push([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+      }
+      if (journey) {
+        // Driving: the vehicle follows its journey; old route shown briefly on reroute.
+        traffic = {
+          edges: arterials,
+          levels: congestionLevels,
+          routePath: journey.coords,
+          altPath: oldRouteCoords,
+          metric: trafficMetric,
+          closures: closureMids,
+          vehicle: vehicle ? vehicle.coord : null,
+        };
+      } else {
+        // Idle: show the two candidate routes for the metric comparison (Slice A).
+        const active = trafficRoutes
+          ? trafficMetric === "time"
+            ? trafficRoutes.byTime
+            : trafficRoutes.byDist
+          : null;
+        const alt = trafficRoutes
+          ? trafficMetric === "time"
+            ? trafficRoutes.byDist
+            : trafficRoutes.byTime
+          : null;
+        const samePath =
+          active && alt && active.path.length === alt.path.length &&
+          active.path.every((x, i) => x === alt.path[i]);
+        traffic = {
+          edges: arterials,
+          levels: congestionLevels,
+          routePath: active && active.path.length >= 2 ? toCoords(active.path) : null,
+          altPath: alt && !samePath && alt.path.length >= 2 ? toCoords(alt.path) : null,
+          metric: trafficMetric,
+          closures: closureMids,
+          vehicle: null,
+        };
+      }
+    }
+
     return buildLayers({
       roadEdges,
-      render,
+      render: trafficMode ? null : render,
       water,
       source: sourceId != null ? graph.coords[sourceId] : null,
       destination: destId != null ? graph.coords[destId] : null,
       sourceLabel,
       destLabel,
+      traffic,
     });
   }, [
     graph,
     roadEdges,
     water,
     precomp,
+    trafficMode,
+    trafficRoutes,
+    trafficMetric,
+    arterials,
+    congestionLevels,
+    closures,
+    journey,
+    vehicle,
+    oldRouteCoords,
     result,
     anim,
     logLen,
@@ -669,6 +950,8 @@ export default function App() {
       />
       <div className="stage-vignette" />
 
+      <ModeSwitch mode={appMode} onMode={setAppMode} />
+
       {phase === "idle" && (
         <div
           className="select-hint"
@@ -697,11 +980,40 @@ export default function App() {
         hint={hint}
         onPlayDemo={handlePlayDemo}
         demoEnabled={chReady && !busy}
+        appMode={appMode}
       />
 
-      <StageTimeline statuses={statuses} />
+      {trafficMode && (
+        <TrafficPanel
+          hour={hour}
+          onHour={setHour}
+          metric={trafficMetric}
+          onMetric={setTrafficMetric}
+          hasEndpoints={sourceId != null && destId != null}
+          timeRoute={
+            trafficRoutes
+              ? { km: trafficRoutes.byTime.meters / 1000, minutes: trafficRoutes.byTime.seconds / 60 }
+              : null
+          }
+          distRoute={
+            trafficRoutes
+              ? { km: trafficRoutes.byDist.meters / 1000, minutes: trafficRoutes.byDist.seconds / 60 }
+              : null
+          }
+          driving={driving}
+          hasJourney={journey != null}
+          onToggleDrive={handleToggleDrive}
+          onInject={handleInject}
+          onClear={handleClearIncidents}
+          rerouteMs={rerouteMs}
+          closuresCount={closures.length}
+          onScenario={handleScenario}
+        />
+      )}
 
-      {!presentation && (
+      {!trafficMode && <StageTimeline statuses={statuses} />}
+
+      {!trafficMode && !presentation && (
         <Metrics
           stageModel={result ? stage.model : null}
           stageName={result ? stage.name : null}
@@ -715,7 +1027,7 @@ export default function App() {
         />
       )}
 
-      {showCompare && results[0] && results[1] && (
+      {!trafficMode && showCompare && results[0] && results[1] && (
         <CompareCard
           dijkstra={results[0].stats}
           astar={results[1].stats}
@@ -725,7 +1037,7 @@ export default function App() {
       )}
 
       {/* Stage 4: the consumer-app route card + the punchline + "show the machinery". */}
-      {presentation && phase === "done" && routeEstimate && (
+      {!trafficMode && presentation && phase === "done" && routeEstimate && (
         <>
           <RouteCard
             fromLabel={sourceLabel}
@@ -750,7 +1062,7 @@ export default function App() {
       )}
 
       {/* Demo Mode: per-stage caption + corner wordmark for screen recording. */}
-      {demoMode && (
+      {!trafficMode && demoMode && (
         <>
           <div className="demo-caption">{stage.caption}</div>
           <div className="demo-wordmark">RouteEngine</div>

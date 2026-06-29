@@ -25,6 +25,8 @@ interface ControlPanelProps {
   /** Auto-play all four stages end-to-end (for a screen recording). */
   onPlayDemo: () => void;
   demoEnabled: boolean;
+  /** Phase 5: which mode is active (drives which controls show). */
+  appMode: "sequence" | "traffic";
 }
 
 /**
@@ -49,8 +51,10 @@ export default function ControlPanel({
   hint,
   onPlayDemo,
   demoEnabled,
+  appMode,
 }: ControlPanelProps) {
   const [query, setQuery] = useState("");
+  const traffic = appMode === "traffic";
 
   return (
     <div className="panel">
@@ -111,32 +115,36 @@ export default function ControlPanel({
         ))}
       </div>
 
-      <div className="section-label">Animation speed</div>
-      <div className="slider-row">
-        <input
-          type="range"
-          min={1}
-          max={120}
-          step={1}
-          value={speed}
-          onChange={(e) => onSpeedChange(Number(e.target.value))}
-        />
-        <span className="val">{speed}×</span>
-      </div>
+      {!traffic && (
+        <>
+          <div className="section-label">Animation speed</div>
+          <div className="slider-row">
+            <input
+              type="range"
+              min={1}
+              max={120}
+              step={1}
+              value={speed}
+              onChange={(e) => onSpeedChange(Number(e.target.value))}
+            />
+            <span className="val">{speed}×</span>
+          </div>
 
-      <div className="actions">
-        <button className="btn btn-run" onClick={onPrimary} disabled={!primaryEnabled}>
-          {primaryLabel}
-        </button>
-        <button className="btn btn-reset" onClick={onReset}>
-          Reset
-        </button>
-      </div>
-      {hint && <div className="panel-hint">{hint}</div>}
+          <div className="actions">
+            <button className="btn btn-run" onClick={onPrimary} disabled={!primaryEnabled}>
+              {primaryLabel}
+            </button>
+            <button className="btn btn-reset" onClick={onReset}>
+              Reset
+            </button>
+          </div>
+          {hint && <div className="panel-hint">{hint}</div>}
 
-      <button className="btn btn-demo" onClick={onPlayDemo} disabled={!demoEnabled}>
-        ▶ Play full sequence
-      </button>
+          <button className="btn btn-demo" onClick={onPlayDemo} disabled={!demoEnabled}>
+            ▶ Play full sequence
+          </button>
+        </>
+      )}
     </div>
   );
 }

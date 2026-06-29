@@ -8,6 +8,7 @@ import {
 } from "@deck.gl/layers";
 import { DataFilterExtension } from "@deck.gl/extensions";
 import type { Layer } from "@deck.gl/core";
+import { CONGESTION_RGB, type Congestion } from "../engine/traffic";
 
 /**
  * Layer construction for the "designed 3D model" view.
@@ -96,6 +97,25 @@ export interface StageRender {
   presentation: boolean; // Stage 4 → hide ALL search, show only the calm route + pins
 }
 
+/** One arterial segment for the congestion overlay (coloured by parallel level). */
+export interface ArterialEdge {
+  sx: number;
+  sy: number;
+  tx: number;
+  ty: number;
+}
+
+/** Phase-5 Traffic-mode render payload (kept entirely separate from the stages). */
+export interface TrafficRender {
+  edges: ArterialEdge[];
+  levels: Uint8Array; // parallel to edges: 0 free / 1 moderate / 2 heavy / 3 closed
+  routePath: [number, number][] | null; // current route under the chosen metric
+  altPath: [number, number][] | null; // a faded comparison route (teaching beat)
+  metric: "time" | "distance";
+  closures: [number, number][]; // midpoints of blocked segments → barrier markers
+  vehicle: [number, number] | null; // animated vehicle position (Slice B)
+}
+
 export interface LayerInput {
   roadEdges: RoadEdge[];
   render: StageRender | null;
@@ -104,6 +124,7 @@ export interface LayerInput {
   destination: [number, number] | null;
   sourceLabel: string;
   destLabel: string;
+  traffic?: TrafficRender | null;
 }
 
 const rgba = (c: RGB, a: number): RGBA => [c[0], c[1], c[2], a];
@@ -181,6 +202,135 @@ export function buildLayers(input: LayerInput): Layer[] {
       widthUnits: "pixels",
     }),
   );
+
+  // 2b. TRAFFIC OVERLAY (Phase 5) — arterials only, green/orange/red, with the
+  // current route, any closures, and the animated vehicle. Entirely separate from
+  // the staged search (which is suppressed: render is null in Traffic mode).
+  const tr = input.traffic;
+  if (tr) {
+    layers.push(
+      new LineLayer<ArterialEdge>({
+        id: "congestion",
+        data: tr.edges,
+        getSourcePosition: (d) => [d.sx, d.sy, 2],
+        getTargetPosition: (d) => [d.tx, d.ty, 2],
+        getColor: (_d, info) => {
+          const lvl = (tr.levels[info.index] ?? 0) as Congestion;
+          const c = CONGESTION_RGB[lvl];
+          return [c[0], c[1], c[2], lvl === 0 ? 120 : 210];
+        },
+        getWidth: (_d, info) => (tr.levels[info.index] >= 2 ? 2.0 : 1.4),
+        widthUnits: "pixels",
+        updateTriggers: { getColor: tr.levels, getWidth: tr.levels },
+      }),
+    );
+
+    // Faded comparison route (the slower/longer alternative in the teaching beat).
+    if (tr.altPath && tr.altPath.length >= 2) {
+      const alt = tr.altPath.map((p) => [p[0], p[1], 5] as [number, number, number]);
+      layers.push(
+        new PathLayer<{ path: [number, number, number][] }>({
+          id: "traffic-alt",
+          data: [{ path: alt }],
+          getPath: (d) => d.path,
+          getColor: [150, 165, 185, 120],
+          getWidth: 5,
+          widthUnits: "pixels",
+          capRounded: true,
+          jointRounded: true,
+        }),
+      );
+    }
+
+    // The active route, coloured by metric (time = calm blue, distance = amber).
+    if (tr.routePath && tr.routePath.length >= 2) {
+      const rgb: RGB = tr.metric === "time" ? [74, 158, 255] : [240, 168, 56];
+      const coords = tr.routePath.map((p) => [p[0], p[1], 6] as [number, number, number]);
+      const data = [{ path: coords }];
+      layers.push(
+        new PathLayer<{ path: [number, number, number][] }>({
+          id: "traffic-route-glow",
+          data,
+          getPath: (d) => d.path,
+          getColor: rgba(rgb, 90),
+          getWidth: 13,
+          widthUnits: "pixels",
+          capRounded: true,
+          jointRounded: true,
+          updateTriggers: { getColor: tr.metric, getPath: coords.length },
+        }),
+        new PathLayer<{ path: [number, number, number][] }>({
+          id: "traffic-route-core",
+          data,
+          getPath: (d) => d.path,
+          getColor: rgba(rgb, 255),
+          getWidth: 5,
+          widthUnits: "pixels",
+          capRounded: true,
+          jointRounded: true,
+          updateTriggers: { getColor: tr.metric, getPath: coords.length },
+        }),
+      );
+    }
+
+    // Closure barriers at blocked segment midpoints — a red glow + bright core so
+    // they're impossible to miss along the route.
+    if (tr.closures.length > 0) {
+      layers.push(
+        new ScatterplotLayer<[number, number]>({
+          id: "traffic-closures-glow",
+          data: tr.closures,
+          getPosition: (d) => [d[0], d[1], 7],
+          getFillColor: [240, 60, 60, 55],
+          getRadius: 16,
+          radiusUnits: "pixels",
+          updateTriggers: { getPosition: tr.closures.length },
+        }),
+        new ScatterplotLayer<[number, number]>({
+          id: "traffic-closures",
+          data: tr.closures,
+          getPosition: (d) => [d[0], d[1], 8],
+          getFillColor: [240, 64, 64, 255],
+          getRadius: 7.5,
+          radiusUnits: "pixels",
+          stroked: true,
+          getLineColor: [255, 226, 226, 255],
+          lineWidthUnits: "pixels",
+          getLineWidth: 2.5,
+          updateTriggers: { getPosition: tr.closures.length },
+        }),
+      );
+    }
+
+    // The vehicle travelling the route (Slice B): a soft blue halo + white core.
+    if (tr.vehicle) {
+      const v = tr.vehicle;
+      layers.push(
+        new ScatterplotLayer<{ p: [number, number] }>({
+          id: "traffic-vehicle-halo",
+          data: [{ p: v }],
+          getPosition: (d) => [d.p[0], d.p[1], 9],
+          getFillColor: [90, 170, 255, 70],
+          getRadius: 13,
+          radiusUnits: "pixels",
+          updateTriggers: { getPosition: v },
+        }),
+        new ScatterplotLayer<{ p: [number, number] }>({
+          id: "traffic-vehicle",
+          data: [{ p: v }],
+          getPosition: (d) => [d.p[0], d.p[1], 11],
+          getFillColor: [255, 255, 255, 255],
+          getRadius: 6,
+          radiusUnits: "pixels",
+          stroked: true,
+          getLineColor: [74, 158, 255, 255],
+          lineWidthUnits: "pixels",
+          getLineWidth: 3,
+          updateTriggers: { getPosition: v },
+        }),
+      );
+    }
+  }
 
   // 3. THE SEARCH
   const r = input.render;
