@@ -644,16 +644,17 @@ export default function App() {
     play(0, s, d, {});
   }
 
-  /** Slice C: one-click "shorter-but-slower" teaching scenario at the morning peak. */
+  /** Slice C: jump to the morning peak so the shorter-but-slower contrast shows.
+   *  Respects endpoints you've already set; only loads a sample pair if none are. */
   function handleScenario() {
     if (!graph) return;
-    const route = QUICK_ROUTES[1]; // Koramangala → Manyata Tech Park (strong peak contrast)
-    const s = nearestNode(graph, route.from.coord[0], route.from.coord[1]);
-    const d = nearestNode(graph, route.to.coord[0], route.to.coord[1]);
-    setSourceId(s);
-    setDestId(d);
-    setSourceLabel(route.from.name);
-    setDestLabel(route.to.name);
+    if (sourceId == null || destId == null) {
+      const route = QUICK_ROUTES[1]; // Koramangala → Manyata Tech Park (strong contrast)
+      setSourceId(nearestNode(graph, route.from.coord[0], route.from.coord[1]));
+      setDestId(nearestNode(graph, route.to.coord[0], route.to.coord[1]));
+      setSourceLabel(route.from.name);
+      setDestLabel(route.to.name);
+    }
     setHour(9); // morning peak — arterials clog, the longer route wins on time
     setTrafficMetric("time");
   }

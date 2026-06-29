@@ -881,8 +881,15 @@ code {
     gap: 6px;
   }
   .panel {
-    top: 58px;
-    max-height: 58vh;
+    top: 60px;
+    max-height: 56vh;
+  }
+  /* Save vertical room on a phone — the brand subtitle is decorative here. */
+  .panel .subtitle {
+    display: none;
+  }
+  .panel h1 {
+    font-size: 22px;
   }
   /* Traffic panel becomes a bottom sheet instead of a colliding top-right box. */
   .traffic-panel {

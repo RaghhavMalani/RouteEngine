@@ -78,8 +78,8 @@ export default function TrafficPanel({
         ✦ Show me a rush-hour detour
       </button>
       <div className="tp-help">
-        Loads a 9am peak trip where the shortest road is jammed and a longer route is
-        actually faster.
+        Jumps to the 9am peak — uses your source &amp; destination if set, otherwise a
+        sample trip — to show the shortest road jam and a faster, longer route.
       </div>
 
       <div className="section-label">Time of day</div>
